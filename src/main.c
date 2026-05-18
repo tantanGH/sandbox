@@ -286,30 +286,30 @@ static void set_crtmod_384x256_16() {
 
 static const uint16_t MINO_TABLE[7][4] = {
     // 0: Iミノ (4x4)
-    { 0x0F00, 0x2222, 0x00F0, 0x4444 }, // 0000111100000000 (横一列) など
+    { 0x0F00, 0x2222, 0x00F0, 0x2222 },
     // 1: Oミノ (2x2だけど4x4の枠内に配置)
     { 0x6600, 0x6600, 0x6600, 0x6600 }, 
     // 2: Tミノ (3x3)
-    { 0x4E00, 0x4640, 0x0E40, 0x4C40 },
+    { 0x04E0, 0x4640, 0x0E40, 0x4C40 },
     // 3: Lミノ
-    { 0x4460, 0x0E80, 0xC440, 0x2E00 },
+    { 0x4460, 0x0E80, 0xC440, 0x02E0 },
     // 4: Jミノ
-    { 0x44C0, 0x8E00, 0x6440, 0x0E20 },
+    { 0x44C0, 0x08E0, 0x6440, 0x0E20 },
     // 5: Sミノ
-    { 0x06C0, 0x4620, 0x0360, 0x2310 },
+    { 0x06C0, 0x8C40, 0x06C0, 0x8C40 },
     // 6: Zミノ
     { 0x0C60, 0x2640, 0x0C60, 0x2640 }
 };
 
-static void locate_mino(int16_t pos_x, int16_t pos_y, int16_t pattern, int16_t rotation, int16_t sp_x[], int16_t sp_y[]) {
+static void locate_mino(int16_t pos_x, int16_t pos_y, int16_t mino, int16_t rotation, int16_t sp_x[], int16_t sp_y[]) {
 
-  uint16_t mino = MINO_TABLE[pattern][rotation];
+  uint16_t pattern = MINO_TABLE[mino][rotation];
   int16_t sp_index = 0;
     
   // 4x4の格子をスキャン
   for (int i = 0; i < 16; i++) {
     // ビットが立っているか（最上位ビットからチェック）
-    if (mino & (0x8000 >> i)) {
+    if (pattern & (0x8000 >> i)) {
       int block_x = i % 4;
       int block_y = i / 4;
             
@@ -416,12 +416,12 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   memset(invalidates, 0, FIELD_SIZE_Y);
 
   // 画面オフセット
-  int16_t grid_x = 4;
+  int16_t grid_x = 3;
   int16_t grid_y = 0;
   uint32_t counter = 0;
 
   // スプライト色と位置
-  int16_t sp_pattern = -1;
+  int16_t sp_mino = -1;
   int16_t sp_rotation = -1;
   int16_t sp_color = -1;
   int16_t sp_pos_x = -1;
@@ -439,9 +439,10 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     if (_iocs_b_sftsns() & 0x01) break; 
 
     // ブロック操作
-    if (sp_color >= 0) {
+    if (sp_mino >= 0) {
 
-      uint32_t j = _iocs_joyget(0);
+      //uint32_t j = _iocs_joyget(0);
+      uint8_t j = *((volatile uint8_t*)(0x0e9a001));
       if ((j & 4) == 0 && sp_x[0] > 16 && sp_x[1] > 16 && sp_x[2] > 16 && sp_x[3] > 16) {
         sp_pos_x -= 2;
         sp_x[0] -= 2;
@@ -465,7 +466,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
       }
       if ((j & 0x40) == 0 && trigger_b == 0) {
         sp_rotation = (sp_rotation + 1) % 4;
-        locate_mino(sp_pos_x, sp_pos_y, sp_pattern, sp_rotation, sp_x, sp_y);
+        locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
         trigger_b = 1;
       }
       if ((j & 0x40)) {
@@ -473,7 +474,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
       }
       if ((j & 0x20) == 0 && trigger_a == 0) {
         sp_rotation = (sp_rotation + 3) % 4;
-        locate_mino(sp_pos_x, sp_pos_y, sp_pattern, sp_rotation, sp_x, sp_y);
+        locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
         trigger_a = 1;    
       }
       if ((j & 0x20)) {
@@ -492,38 +493,24 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
     // 新規ブロック
     int16_t block_new = 0;
-    if ((counter % 200) == 0 && sp_pattern < 0) {
+    if ((counter % 200) == 0 && sp_mino < 0) {
 
-      sp_pattern = rand() % 7;
+      sp_mino = rand() % 7;
       sp_rotation = rand() % 4;
       sp_color = rand() % 4;
       sp_pos_x = grid_x * 12 + 16;
       sp_pos_y = grid_y * 12 + 16;
 
-      uint16_t pattern = MINO_TABLE[sp_pattern][sp_rotation];
-      int16_t sp_index = 0;
-    
-      // 4x4の格子をスキャン
-      for (int16_t i = 0; i < 16; i++) {
-        // ビットが立っているか（最上位ビットからチェック）
-        if (pattern & (0x8000 >> i)) {
-          int16_t block_x = i % 4;
-          int16_t block_y = i / 4;                
-          // 画面上の実際のスプライト座標
-          sp_x[sp_index] = sp_pos_x + block_x * 12;
-          sp_y[sp_index] = sp_pos_y + block_y * 12;
-          sp_index++;
-        }
-      }
+      locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
 
       block_new = 1;
     }      
 
     // ブロックの砂化
     int16_t block_delete = 0;
-    if (sp_pattern >= 0 && sp_y[0] > 120 && sp_y[1] > 120 && sp_y[2] > 120 && sp_y[3] > 120) {
+    if (sp_mino >= 0 && sp_y[0] > 120 && sp_y[1] > 120 && sp_y[2] > 120 && sp_y[3] > 120) {
 
-      uint16_t pattern = MINO_TABLE[sp_pattern][sp_rotation];
+      uint16_t pattern = MINO_TABLE[sp_mino][sp_rotation];
 
       // 4x4の格子をスキャン
       for (int16_t i = 0; i < 16; i++) {
@@ -535,7 +522,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         }
       }
 
-      sp_pattern = -1;
+      sp_mino = -1;
       sp_rotation = -1;
       sp_color = -1;
 
@@ -547,8 +534,8 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     counter++;
 
     // 砂の動き(下から)
-    for (int16_t y = 238; y >= 0; y--) {
-      for (int16_t x = 0; x < 120; x++) {
+    for (int16_t y = FIELD_SIZE_Y-2; y >= 0; y--) {
+      for (int16_t x = 0; x < FIELD_SIZE_X; x++) {
         
         // この位置はボイド
         if (particles[y][x].attr.color == 0) continue;
@@ -671,7 +658,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     WAIT_VBLANK;
     uint64_t* gp = (uint64_t*)0xC00000;
     uint64_t* fp = (uint64_t*)particles;
-    for (uint16_t y = 0; y < 240; y++) {
+    for (uint16_t y = 0; y < FIELD_SIZE_Y; y++) {
       if (invalidates[y]) {
         *gp++ = *fp++;
         *gp++ = *fp++;
@@ -706,7 +693,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         *gp++ = *fp++;
         *gp++ = *fp++;
 
-        gp += 512/4 - 120/4;
+        gp += 512/4 - FIELD_SIZE_X/4;
 
         invalidates[y] = 0;
 
@@ -774,6 +761,9 @@ exit:
   }
 
   _dos_c_curon();
+
+  // キーバッファフラッシュ
+  _dos_kflushio(0xff);
 
   return rc;
 }

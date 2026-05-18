@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define VERSION "0.1.0 (2026/05/18)"
+#define VERSION "0.1.1 (2026/05/18)"
 
 #define NUM_SANDS (12)
 #define FIELD_SIZE_X (NUM_SANDS * 10)
