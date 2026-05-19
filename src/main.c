@@ -576,9 +576,6 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
     counter++;
 
-    uint16_t count_void = 0;
-    uint16_t count_sleep = 0;
-
     // 砂の動き(下から)
     for (int16_t y = FIELD_SIZE_Y-2; y >= 0; y--) {
 
@@ -586,11 +583,9 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         
         // 砂がない、またはスリープ状態ならスキップ
         if (particles[y][x].attr.color == 0) {
-          count_void++;
           continue;
         }
         if (particles[y][x].attr.moment_x == -4) {
-          count_sleep++;
           continue;
         }
 
@@ -761,6 +756,24 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         }
       }
     }
+
+    // 左右が繋がったかチェック
+    for (int16_t y = FIELD_SIZE_Y-1; y >= 0; y--) {
+
+      uint8_t c = particles[y][0].attr.color;
+
+      if (c == 0) {
+        // 左端に砂はない
+        continue;
+      }
+
+      for (int16_t x = 1; x < FIELD_SIZE_X; x++) {
+        if (particles[y][x] == c ||
+            )
+      }
+
+    }
+
 
     // 追い越しガード
     while (page_calc == page_render) {
