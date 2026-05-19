@@ -36,7 +36,7 @@ C_SRCS = main.c
 ASM_SRCS = 
 
 # *.h source files
-HEADER_SRCS = sandbox.h
+HEADER_SRCS = pattern.h sandbox.h
 
 # リンク対象のライブラリファイル
 LIBS =
