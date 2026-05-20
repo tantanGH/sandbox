@@ -494,10 +494,65 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     // SHIFTキーが押されたら終了
     if (_iocs_b_sftsns() & 0x01) break; 
 
+    // このフレームで物理を動かすかどうか
+    int16_t run_physics = 1;
+
     // 左右開通時のフリーズタイマーチェック
     if (clear_freeze_counter > 0) {
 
+      WAIT_VBLANK; 
+
       clear_freeze_counter--;
+
+      // ========================================================
+      // 【追加】カウントダウン途中（タイマー > 0）の明滅演出
+      // ========================================================
+      if (clear_freeze_counter > 0 && fire_c >= 0 && (clear_freeze_counter % 4) == 0) {
+        
+        // タイマーのビット3を使って、4フレームごとに「点滅のON/OFF」を切り替える
+        int16_t flash_on = (clear_freeze_counter & 4); 
+
+        // 開通した「火のルート」だけを走査
+        for (int16_t fy = FIELD_SIZE_Y/2 - 1; fy >= 0; fy--) {
+          BITLINE80 f = fire[fy];
+          if (f.lo == 0 && f.mi == 0 && f.hi == 0) continue;
+
+          int16_t py0 = fy << 1;
+          int16_t py1 = py0 + 1;
+
+          for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
+            int is_fired = 0;
+            if (px < 32)      { if (f.lo & (1 << px)) is_fired = 1; }
+            else if (px < 64) { if (f.mi & (1 << (px - 32))) is_fired = 1; }
+            else              { if (f.hi & (1 << (px - 64))) is_fired = 1; }
+
+            if (is_fired) {
+              // 火が通っているドットの色が、開通した色グループ（fire_c）と一致するか確認
+              // ※ py0のチェック
+              if (particles[py0][px].raw != 0 && ((particles[py0][px].attr.color - 1) & 3) == fire_c) {
+                if (flash_on) {
+                  // ONのとき：元の色グループ（0〜3）に対応する白パレット（13, 14, 15など）をぶち込む
+                  screen_buffers[page_calc][py0][px] = 13 + ((particles[py0][px].attr.color - 1) >> 2);
+                } else {
+                  // OFFのとき：元の砂の色（particlesに保存されている色）に戻す
+                  screen_buffers[page_calc][py0][px] = particles[py0][px].attr.color;
+                }
+                invalidates[page_calc][py0] = 1; // 画面書き換えフラグを立てる
+              }
+
+              // ※ py1のチェック
+              if (py1 < FIELD_SIZE_Y && particles[py1][px].raw != 0 && ((particles[py1][px].attr.color - 1) & 3) == fire_c) {
+                if (flash_on) {
+                  screen_buffers[page_calc][py1][px] = 13 + ((particles[py1][px].attr.color - 1) >> 2);
+                } else {
+                  screen_buffers[page_calc][py1][px] = particles[py1][px].attr.color;
+                }
+                invalidates[page_calc][py1] = 1;
+              }
+            }
+          } // px
+        } // fy
+      }
 
       if (clear_freeze_counter == 0 && fire_c >= 0) {
 
@@ -591,445 +646,447 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
       }
 
-      WAIT_VSYNC;
-
-      continue;
+      run_physics = 0;
 
     }
 
-    // ブロック操作
-    if (sp_mino >= 0) {
+    if (run_physics) {
 
-      //uint32_t j = _iocs_joyget(0);
-      uint8_t j = *((volatile uint8_t*)(0x0e9a001));
-      if ((j & 4) == 0 && sp_x[0] > 16+24 && sp_x[1] > 16+24 && sp_x[2] > 16+24 && sp_x[3] > 16+24) {
-        sp_pos_x -= 2;
-        sp_x[0] -= 2;
-        sp_x[1] -= 2;
-        sp_x[2] -= 2; 
-        sp_x[3] -= 2;               
-      }
-      if ((j & 8) == 0 && sp_x[0] < 16+24+80-8 && sp_x[1] < 16+24+80-8 && sp_x[2] < 16+24+80-8 && sp_x[3] < 16+24+80-8) {
-        sp_pos_x += 2;
-        sp_x[0] += 2;
-        sp_x[1] += 2;
-        sp_x[2] += 2;
-        sp_x[3] += 2;
-      }
-      if ((j & 2) == 0 && sp_y[0] < 16+240-12 && sp_y[1] < 16+240-12 && sp_y[2] < 16+240-12 && sp_y[3] < 16+240-12) {
-        sp_pos_y += 3;
-        sp_y[0] += 3;
-        sp_y[1] += 3;
-        sp_y[2] += 3;
-        sp_y[3] += 3;
-      }
-      if ((j & 0x40) == 0 && trigger_b == 0) {
-        if (locate_mino_check(sp_pos_x, sp_pos_y, sp_mino, (sp_rotation + 1) % 4)) {
-          sp_rotation = (sp_rotation + 1) % 4;
-          locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
-          trigger_b = 1;
+      // ブロック操作
+      if (sp_mino >= 0) {
+
+        //uint32_t j = _iocs_joyget(0);
+        uint8_t j = *((volatile uint8_t*)(0x0e9a001));
+        if ((j & 4) == 0 && sp_x[0] > 16+24 && sp_x[1] > 16+24 && sp_x[2] > 16+24 && sp_x[3] > 16+24) {
+          sp_pos_x -= 2;
+          sp_x[0] -= 2;
+          sp_x[1] -= 2;
+          sp_x[2] -= 2; 
+          sp_x[3] -= 2;               
         }
-      }
-      if ((j & 0x40)) {
-        trigger_b = 0;
-      }
-      if ((j & 0x20) == 0 && trigger_a == 0) {
-        if (locate_mino_check(sp_pos_x, sp_pos_y, sp_mino, (sp_rotation + 3) % 4)) {
-          sp_rotation = (sp_rotation + 3) % 4;
-          locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
-          trigger_a = 1;    
+        if ((j & 8) == 0 && sp_x[0] < 16+24+80-8 && sp_x[1] < 16+24+80-8 && sp_x[2] < 16+24+80-8 && sp_x[3] < 16+24+80-8) {
+          sp_pos_x += 2;
+          sp_x[0] += 2;
+          sp_x[1] += 2;
+          sp_x[2] += 2;
+          sp_x[3] += 2;
         }
-      }
-      if ((j & 0x20)) {
-        trigger_a = 0;
-      }
-
-      if ((counter % 2) == 0) {
-        sp_pos_y++;
-        sp_y[0]++;
-        sp_y[1]++;
-        sp_y[2]++;
-        sp_y[3]++;
-      }
-
-    }
-
-    // 新規ブロック
-    if ((counter % 200) == 0 && sp_mino < 0) {
-
-      sp_mino = quickrand() % 7;
-      sp_rotation = quickrand() & 3;
-      sp_color = rand() % 4;
-      sp_pos_x = grid_x * NUM_SANDS_X + 16;
-      sp_pos_y = grid_y * NUM_SANDS_Y + 16;
-
-      locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
-
-      block_event_new = 1;
-    }      
-
-    // ブロックの砂化
-    int16_t block_delete = 0;
-    if (sp_mino >= 0 && (
-        (sp_y[0] - 16 + 12 >= 240 || sp_y[1] - 16 + 12 >= 240 || sp_y[2] - 16 + 12 >= 240 || sp_y[3] - 16 + 12 >= 240) ||
-
-        (particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24    ].attr.color > 0 ||
-         particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24 + 2].attr.color > 0 || 
-         particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24 + 4].attr.color > 0 || 
-         particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24 + 6].attr.color > 0) ||
-
-        (particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24    ].attr.color > 0 ||
-         particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24 + 2].attr.color > 0 || 
-         particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24 + 4].attr.color > 0 || 
-         particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24 + 6].attr.color > 0) ||
-
-        (particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24    ].attr.color > 0 ||
-         particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24 + 2].attr.color > 0 || 
-         particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24 + 4].attr.color > 0 || 
-         particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24 + 6].attr.color > 0) ||
-
-        (particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24    ].attr.color > 0 ||
-         particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 2].attr.color > 0 || 
-         particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 4].attr.color > 0 || 
-         particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 6].attr.color > 0))) {
-
-      uint16_t pattern = MINO_TABLE[sp_mino][sp_rotation];
-
-      // 4x4の格子をスキャン
-      for (int16_t i = 0; i < 16; i++) {
-        // ビットが立っているか（最上位ビットからチェック）
-        if (pattern & (0x8000 >> i)) {
-          int16_t block_x = i % 4;
-          int16_t block_y = i / 4;                
-          put_particles(sp_pos_x - 16 - 24 + block_x * NUM_SANDS_X, sp_pos_y - 16 + block_y * NUM_SANDS_Y, sp_color);
+        if ((j & 2) == 0 && sp_y[0] < 16+240-12 && sp_y[1] < 16+240-12 && sp_y[2] < 16+240-12 && sp_y[3] < 16+240-12) {
+          sp_pos_y += 3;
+          sp_y[0] += 3;
+          sp_y[1] += 3;
+          sp_y[2] += 3;
+          sp_y[3] += 3;
         }
-      }
-
-      sp_mino = -1;
-      sp_rotation = -1;
-      sp_color = -1;
-
-      counter = 150;
-
-      block_event_delete = 1;
-    }
-
-    counter++;
-
-    // 砂の動き(下から)
-    for (int16_t y = FIELD_SIZE_Y-2; y >= 0; y--) {
-
-      for (int16_t x = 0; x < FIELD_SIZE_X; x++) {
-        
-        // 砂がない、またはスリープ状態ならスキップ
-        if (particles[y][x].attr.color == 0) {
-          continue;
-        }
-        if (particles[y][x].attr.moment_x == -4) {
-          continue;
-        }
-
-        // --- 物理パラメータの更新 ---
-        // 直下が空いているか、またはすでに落下モーメントがある場合
-        if (y < FIELD_SIZE_Y-1 && particles[y+1][x].attr.color == 0) {
-          if (particles[y][x].attr.moment_y == 0) {
-            // 動き出しのランダムXモーメント (4に設定するとスリープ状態)
-            int16_t r = quickrand() & 127;
-            particles[y][x].attr.moment_x = r <  2  ? -3 : 
-                                            r < 15  ? -2 :
-                                            r < 45  ? -1 :
-                                            r < 83  ?  0 :
-                                            r < 113 ?  1 :
-                                            r < 126 ?  2 : 3;
+        if ((j & 0x40) == 0 && trigger_b == 0) {
+          if (locate_mino_check(sp_pos_x, sp_pos_y, sp_mino, (sp_rotation + 1) % 4)) {
+            sp_rotation = (sp_rotation + 1) % 4;
+            locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
+            trigger_b = 1;
           }
-          // Y方向加速 (最大速度を7に制限してループさせない)
-          if (particles[y][x].attr.moment_y < 7) {
-            particles[y][x].attr.moment_y++;
+        }
+        if ((j & 0x40)) {
+          trigger_b = 0;
+        }
+        if ((j & 0x20) == 0 && trigger_a == 0) {
+          if (locate_mino_check(sp_pos_x, sp_pos_y, sp_mino, (sp_rotation + 3) % 4)) {
+            sp_rotation = (sp_rotation + 3) % 4;
+            locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
+            trigger_a = 1;    
+          }
+        }
+        if ((j & 0x20)) {
+          trigger_a = 0;
+        }
+
+        if ((counter % 2) == 0) {
+          sp_pos_y++;
+          sp_y[0]++;
+          sp_y[1]++;
+          sp_y[2]++;
+          sp_y[3]++;
+        }
+
+      }
+
+      // 新規ブロック
+      if ((counter % 200) == 0 && sp_mino < 0) {
+
+        sp_mino = quickrand() % 7;
+        sp_rotation = quickrand() & 3;
+        sp_color = rand() % 4;
+        sp_pos_x = grid_x * NUM_SANDS_X + 16;
+        sp_pos_y = grid_y * NUM_SANDS_Y + 16;
+
+        locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
+
+        block_event_new = 1;
+      }      
+
+      // ブロックの砂化
+      int16_t block_delete = 0;
+      if (sp_mino >= 0 && (
+          (sp_y[0] - 16 + 12 >= 240 || sp_y[1] - 16 + 12 >= 240 || sp_y[2] - 16 + 12 >= 240 || sp_y[3] - 16 + 12 >= 240) ||
+
+          (particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24    ].attr.color > 0 ||
+          particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24 + 2].attr.color > 0 || 
+          particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24 + 4].attr.color > 0 || 
+          particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24 + 6].attr.color > 0) ||
+
+          (particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24    ].attr.color > 0 ||
+          particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24 + 2].attr.color > 0 || 
+          particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24 + 4].attr.color > 0 || 
+          particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24 + 6].attr.color > 0) ||
+
+          (particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24    ].attr.color > 0 ||
+          particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24 + 2].attr.color > 0 || 
+          particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24 + 4].attr.color > 0 || 
+          particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24 + 6].attr.color > 0) ||
+
+          (particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24    ].attr.color > 0 ||
+          particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 2].attr.color > 0 || 
+          particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 4].attr.color > 0 || 
+          particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 6].attr.color > 0))) {
+
+        uint16_t pattern = MINO_TABLE[sp_mino][sp_rotation];
+
+        // 4x4の格子をスキャン
+        for (int16_t i = 0; i < 16; i++) {
+          // ビットが立っているか（最上位ビットからチェック）
+          if (pattern & (0x8000 >> i)) {
+            int16_t block_x = i % 4;
+            int16_t block_y = i / 4;                
+            put_particles(sp_pos_x - 16 - 24 + block_x * NUM_SANDS_X, sp_pos_y - 16 + block_y * NUM_SANDS_Y, sp_color);
+          }
+        }
+
+        sp_mino = -1;
+        sp_rotation = -1;
+        sp_color = -1;
+
+        counter = 150;
+
+        block_event_delete = 1;
+      }
+
+      counter++;
+
+      // 砂の動き(下から)
+      for (int16_t y = FIELD_SIZE_Y-2; y >= 0; y--) {
+
+        for (int16_t x = 0; x < FIELD_SIZE_X; x++) {
+          
+          // 砂がない、またはスリープ状態ならスキップ
+          if (particles[y][x].attr.color == 0) {
+            continue;
+          }
+          if (particles[y][x].attr.moment_x == -4) {
+            continue;
           }
 
-        } else {
+          // --- 物理パラメータの更新 ---
+          // 直下が空いているか、またはすでに落下モーメントがある場合
+          if (y < FIELD_SIZE_Y-1 && particles[y+1][x].attr.color == 0) {
+            if (particles[y][x].attr.moment_y == 0) {
+              // 動き出しのランダムXモーメント (4に設定するとスリープ状態)
+              int16_t r = quickrand() & 127;
+              particles[y][x].attr.moment_x = r <  2  ? -3 : 
+                                              r < 15  ? -2 :
+                                              r < 45  ? -1 :
+                                              r < 83  ?  0 :
+                                              r < 113 ?  1 :
+                                              r < 126 ?  2 : 3;
+            }
+            // Y方向加速 (最大速度を7に制限してループさせない)
+            if (particles[y][x].attr.moment_y < 7) {
+              particles[y][x].attr.moment_y++;
+            }
 
-          // 下が詰まっていて、かつY速度が0なら、山を崩すための横滑り判定
-          if (particles[y][x].attr.moment_y == 0 && particles[y][x].attr.moment_x == 0) {
-            
-            // 最下段にいる場合は、これ以上下に滑れないので何もしない
-            if (y < FIELD_SIZE_Y-1) {
+          } else {
 
-              // 「斜め下」のグリッドの空き状況をチェック
-              int16_t left_down_empty  = (x > 0              && particles[y+1][x-1].attr.color == 0);
-              int16_t right_down_empty = (x < FIELD_SIZE_X-1 && particles[y+1][x+1].attr.color == 0);
+            // 下が詰まっていて、かつY速度が0なら、山を崩すための横滑り判定
+            if (particles[y][x].attr.moment_y == 0 && particles[y][x].attr.moment_x == 0) {
+              
+              // 最下段にいる場合は、これ以上下に滑れないので何もしない
+              if (y < FIELD_SIZE_Y-1) {
 
-              if (left_down_empty && right_down_empty) {
+                // 「斜め下」のグリッドの空き状況をチェック
+                int16_t left_down_empty  = (x > 0              && particles[y+1][x-1].attr.color == 0);
+                int16_t right_down_empty = (x < FIELD_SIZE_X-1 && particles[y+1][x+1].attr.color == 0);
 
-                if ((quickrand() & 127) < 35) { 
-                    // 30%の確率で「引っかかって止まる」
-                    particles[y][x].attr.moment_x = 0; 
+                if (left_down_empty && right_down_empty) {
+
+                  if ((quickrand() & 127) < 35) { 
+                      // 30%の確率で「引っかかって止まる」
+                      particles[y][x].attr.moment_x = 0; 
+                  } else {
+                      // 両方空いているなら、ランダムでどちらかに滑り出す
+                      particles[y][x].attr.moment_x = (quickrand() & 1) ? -1 : 1;
+                  }
+
+                  // 【重要】滑り出す瞬間、サブピクセル位置を中央にリセットすると
+                  // 挙動がガタつかず滑らかになります
+                  particles[y][x].attr.sub_x = (quickrand() & 1) ? 3 : 4;
+                  particles[y][x].attr.sub_y = 0;
+                  
+                } else if (left_down_empty) {
+                  particles[y][x].attr.moment_x = -1; // 左斜め下へ
+                  particles[y][x].attr.sub_x = 0;
+                  particles[y][x].attr.sub_y = 0;
+                  
+                } else if (right_down_empty) {
+                  particles[y][x].attr.moment_x = 1;  // 右斜め下へ
+                  particles[y][x].attr.sub_x = 0;
+                  particles[y][x].attr.sub_y = 0;
                 } else {
-                    // 両方空いているなら、ランダムでどちらかに滑り出す
-                    particles[y][x].attr.moment_x = (quickrand() & 1) ? -1 : 1;
+                  // 両方埋まっているなら、スリープ状態へ
+                  particles[y][x].attr.moment_x = -4;
+                  continue;
                 }
-
-                // 【重要】滑り出す瞬間、サブピクセル位置を中央にリセットすると
-                // 挙動がガタつかず滑らかになります
-                particles[y][x].attr.sub_x = (quickrand() & 1) ? 3 : 4;
-                particles[y][x].attr.sub_y = 0;
-                
-              } else if (left_down_empty) {
-                particles[y][x].attr.moment_x = -1; // 左斜め下へ
-                particles[y][x].attr.sub_x = 0;
-                particles[y][x].attr.sub_y = 0;
-                
-              } else if (right_down_empty) {
-                particles[y][x].attr.moment_x = 1;  // 右斜め下へ
-                particles[y][x].attr.sub_x = 0;
-                particles[y][x].attr.sub_y = 0;
               } else {
-                // 両方埋まっているなら、スリープ状態へ
+                // 最下段にいるので、スリープ状態へ
                 particles[y][x].attr.moment_x = -4;
                 continue;
               }
-            } else {
-              // 最下段にいるので、スリープ状態へ
-              particles[y][x].attr.moment_x = -4;
-              continue;
             }
+
           }
 
-        }
+          // --- 次の予測座標の計算 (ビット演算で高速化) ---
+          int16_t current_py = (y << 3) | particles[y][x].attr.sub_y;
+          int16_t current_px = (x << 3) | particles[y][x].attr.sub_x;
 
-        // --- 次の予測座標の計算 (ビット演算で高速化) ---
-        int16_t current_py = (y << 3) | particles[y][x].attr.sub_y;
-        int16_t current_px = (x << 3) | particles[y][x].attr.sub_x;
+          int16_t next_py = current_py + particles[y][x].attr.moment_y;
+          int16_t next_px = current_px + particles[y][x].attr.moment_x;
 
-        int16_t next_py = current_py + particles[y][x].attr.moment_y;
-        int16_t next_px = current_px + particles[y][x].attr.moment_x;
+          // 整数座標（グリッド位置）を算出 ( /8 は >>3、 %8 は &7 に置換)
+          int16_t next_y_hi = next_py >> 3;
+          int16_t next_x_hi = next_px >> 3;
 
-        // 整数座標（グリッド位置）を算出 ( /8 は >>3、 %8 は &7 に置換)
-        int16_t next_y_hi = next_py >> 3;
-        int16_t next_x_hi = next_px >> 3;
+          // 画面外チェック
+          if (next_y_hi > FIELD_SIZE_Y - 1) { next_y_hi = FIELD_SIZE_Y - 1; particles[y][x].attr.moment_y = 0; }
+          if (next_x_hi < 0)                { next_x_hi = 0;                particles[y][x].attr.moment_x = 0; }
+          if (next_x_hi > FIELD_SIZE_X - 1) { next_x_hi = FIELD_SIZE_X - 1; particles[y][x].attr.moment_x = 0; }
 
-        // 画面外チェック
-        if (next_y_hi > FIELD_SIZE_Y - 1) { next_y_hi = FIELD_SIZE_Y - 1; particles[y][x].attr.moment_y = 0; }
-        if (next_x_hi < 0)                { next_x_hi = 0;                particles[y][x].attr.moment_x = 0; }
-        if (next_x_hi > FIELD_SIZE_X - 1) { next_x_hi = FIELD_SIZE_X - 1; particles[y][x].attr.moment_x = 0; }
+          // --- 運命の衝突判定 ---
+          // 移動先が「自分自身と同じ場所」か、あるいは「移動先が空っぽ」なら移動成功！
+          if ((next_y_hi == y && next_x_hi == x) || particles[next_y_hi][next_x_hi].attr.color == 0) {
 
-        // --- 運命の衝突判定 ---
-        // 移動先が「自分自身と同じ場所」か、あるいは「移動先が空っぽ」なら移動成功！
-        if ((next_y_hi == y && next_x_hi == x) || particles[next_y_hi][next_x_hi].attr.color == 0) {
+            if (next_y_hi == y && next_x_hi == x) {
+              // 【パターンA】同じマス内でのサブピクセル移動（微細な動き）
+              // データの退避やクリアは不要！ 小数点座標だけをダイレクトに更新する
+              particles[y][x].attr.sub_y = next_py & 7;
+              particles[y][x].attr.sub_x = next_px & 7;
+              
+              // 完全に同じマス内の動きなので、GVRAMへの転送（invalidate）は不要！！
+              // （ドット単位の描画は次のグリッド移動時に反映されるため、ここでラインを汚す必要はありません）
+              //screen_buffers[page_calc][y][x] = particles[y][x].attr.color;
 
-          if (next_y_hi == y && next_x_hi == x) {
-            // 【パターンA】同じマス内でのサブピクセル移動（微細な動き）
-            // データの退避やクリアは不要！ 小数点座標だけをダイレクトに更新する
-            particles[y][x].attr.sub_y = next_py & 7;
-            particles[y][x].attr.sub_x = next_px & 7;
-            
-            // 完全に同じマス内の動きなので、GVRAMへの転送（invalidate）は不要！！
-            // （ドット単位の描画は次のグリッド移動時に反映されるため、ここでラインを汚す必要はありません）
-            //screen_buffers[page_calc][y][x] = particles[y][x].attr.color;
+            } else {
+
+              // 【パターンB】別のマスへの本当の移動！
+              PARTICLE tmp = particles[y][x];
+              tmp.attr.sub_y = next_py & 7;
+              tmp.attr.sub_x = next_px & 7;
+
+              // 元の場所を消して、新しい場所に書き込む
+              particles[y][x].raw = 0;
+              particles[next_y_hi][next_x_hi].raw = tmp.raw;
+
+              // 画面描画用バッファにカラーコードを書き込む
+              screen_buffers[page_calc][y][x] = 0; 
+              screen_buffers[page_calc][next_y_hi][next_x_hi] = tmp.attr.color;
+
+              // マスが変わったので、元いたラインと、移動先のラインを再描画対象にする
+              invalidates[page_calc][y] = 1;
+              invalidates[page_calc][next_y_hi] = 1;
+
+              // 色別グリッドバッファに書き込む (元のグリッドからは消さない) ---
+              int16_t c       = (tmp.attr.color - 1) & 3; // 4色グループへのマスク
+              int16_t next_cy = next_y_hi >> 1;     // 縦は2ドット単位なので「>> 1」(120行)
+
+              // 移動先のX座標を基準に、lo / mi / hi へ綺麗に振り分ける
+              if (next_x_hi < 32) {
+                // 0 〜 31 ドット目：loレジスタ
+                coarse_map[c][next_cy].lo |= (1 << next_x_hi);
+              } 
+              else if (next_x_hi < 64) {
+                // 32 〜 63 ドット目：miレジスタ（32を引いて 0〜31番目のビットにする）
+                coarse_map[c][next_cy].mi |= (1 << (next_x_hi - 32));
+              } 
+              else {
+                // 64 〜 79 ドット目：hiレジスタ（64を引いて 0〜15番目のビットにする）
+                coarse_map[c][next_cy].hi |= (1 << (next_x_hi - 64));
+              }
+              
+              // ★【前述のウェイクアップ処理を入れるならここ！】
+              // 実際に別のマスへ移動が起きたので、周囲の砂を起こす
+              if (y > 0) {
+                if (x > 0)                { if (particles[y-1][x-1].attr.moment_x == -4) particles[y-1][x-1].attr.moment_x = 0; }
+                { if (particles[y-1][x].attr.moment_x == -4)   particles[y-1][x].attr.moment_x = 0; }
+                if (x < FIELD_SIZE_X - 1) { if (particles[y-1][x+1].attr.moment_x == -4) particles[y-1][x+1].attr.moment_x = 0; }
+              }
+              if (x > 0)                { if (particles[y][x-1].attr.moment_x == -4) particles[y][x-1].attr.moment_x = 0; }
+              if (x < FIELD_SIZE_X - 1) { if (particles[y][x+1].attr.moment_x == -4) particles[y][x+1].attr.moment_x = 0; }
+            }
+
+            // 実際に元の座標(y, x)から別の座標へ移動が起きた場合のみ、周囲を起こす
+            if (next_y_hi != y || next_x_hi != x) {
+              // 1. 上の行の3粒を起こす
+              if (y > 0) {
+                if (x > 0)                { if (particles[y-1][x-1].attr.moment_x == -4) particles[y-1][x-1].attr.moment_x = 0; }
+                { if (particles[y-1][x].attr.moment_x == -4)   particles[y-1][x].attr.moment_x = 0; }
+                if (x < FIELD_SIZE_X - 1) { if (particles[y-1][x+1].attr.moment_x == -4) particles[y-1][x+1].attr.moment_x = 0; }
+              }
+              // 2. 自分の真横の2粒を起こす
+              if (x > 0)                { if (particles[y][x-1].attr.moment_x == -4) particles[y][x-1].attr.moment_x = 0; }
+              if (x < FIELD_SIZE_X - 1) { if (particles[y][x+1].attr.moment_x == -4) particles[y][x+1].attr.moment_x = 0; }
+            }
 
           } else {
+            // 衝突した（直下が埋まっていた）
+            particles[y][x].attr.moment_y = 0; // 縦の勢いは止まる
 
-            // 【パターンB】別のマスへの本当の移動！
-            PARTICLE tmp = particles[y][x];
-            tmp.attr.sub_y = next_py & 7;
-            tmp.attr.sub_x = next_px & 7;
+            // 左右の空き状況を見て、斜面に沿って転がす
+            int16_t left_empty  = (x > 0  && particles[y+1][x-1].attr.color == 0);
+            int16_t right_empty = (x < FIELD_SIZE_X - 1 && particles[y+1][x+1].attr.color == 0);
 
-            // 元の場所を消して、新しい場所に書き込む
-            particles[y][x].raw = 0;
-            particles[next_y_hi][next_x_hi].raw = tmp.raw;
-
-            // 画面描画用バッファにカラーコードを書き込む
-            screen_buffers[page_calc][y][x] = 0; 
-            screen_buffers[page_calc][next_y_hi][next_x_hi] = tmp.attr.color;
-
-            // マスが変わったので、元いたラインと、移動先のラインを再描画対象にする
-            invalidates[page_calc][y] = 1;
-            invalidates[page_calc][next_y_hi] = 1;
-
-            // 色別グリッドバッファに書き込む (元のグリッドからは消さない) ---
-            int16_t c       = (tmp.attr.color - 1) & 3; // 4色グループへのマスク
-            int16_t next_cy = next_y_hi >> 1;     // 縦は2ドット単位なので「>> 1」(120行)
-
-            // 移動先のX座標を基準に、lo / mi / hi へ綺麗に振り分ける
-            if (next_x_hi < 32) {
-              // 0 〜 31 ドット目：loレジスタ
-              coarse_map[c][next_cy].lo |= (1 << next_x_hi);
-            } 
-            else if (next_x_hi < 64) {
-              // 32 〜 63 ドット目：miレジスタ（32を引いて 0〜31番目のビットにする）
-              coarse_map[c][next_cy].mi |= (1 << (next_x_hi - 32));
-            } 
-            else {
-              // 64 〜 79 ドット目：hiレジスタ（64を引いて 0〜15番目のビットにする）
-              coarse_map[c][next_cy].hi |= (1 << (next_x_hi - 64));
-            }
-            
-            // ★【前述のウェイクアップ処理を入れるならここ！】
-            // 実際に別のマスへ移動が起きたので、周囲の砂を起こす
-            if (y > 0) {
-              if (x > 0)                { if (particles[y-1][x-1].attr.moment_x == -4) particles[y-1][x-1].attr.moment_x = 0; }
-              { if (particles[y-1][x].attr.moment_x == -4)   particles[y-1][x].attr.moment_x = 0; }
-              if (x < FIELD_SIZE_X - 1) { if (particles[y-1][x+1].attr.moment_x == -4) particles[y-1][x+1].attr.moment_x = 0; }
-            }
-            if (x > 0)                { if (particles[y][x-1].attr.moment_x == -4) particles[y][x-1].attr.moment_x = 0; }
-            if (x < FIELD_SIZE_X - 1) { if (particles[y][x+1].attr.moment_x == -4) particles[y][x+1].attr.moment_x = 0; }
-          }
-
-          // 実際に元の座標(y, x)から別の座標へ移動が起きた場合のみ、周囲を起こす
-          if (next_y_hi != y || next_x_hi != x) {
-            // 1. 上の行の3粒を起こす
-            if (y > 0) {
-              if (x > 0)                { if (particles[y-1][x-1].attr.moment_x == -4) particles[y-1][x-1].attr.moment_x = 0; }
-              { if (particles[y-1][x].attr.moment_x == -4)   particles[y-1][x].attr.moment_x = 0; }
-              if (x < FIELD_SIZE_X - 1) { if (particles[y-1][x+1].attr.moment_x == -4) particles[y-1][x+1].attr.moment_x = 0; }
-            }
-            // 2. 自分の真横の2粒を起こす
-            if (x > 0)                { if (particles[y][x-1].attr.moment_x == -4) particles[y][x-1].attr.moment_x = 0; }
-            if (x < FIELD_SIZE_X - 1) { if (particles[y][x+1].attr.moment_x == -4) particles[y][x+1].attr.moment_x = 0; }
-          }
-
-        } else {
-          // 衝突した（直下が埋まっていた）
-          particles[y][x].attr.moment_y = 0; // 縦の勢いは止まる
-
-          // 左右の空き状況を見て、斜面に沿って転がす
-          int16_t left_empty  = (x > 0  && particles[y+1][x-1].attr.color == 0);
-          int16_t right_empty = (x < FIELD_SIZE_X - 1 && particles[y+1][x+1].attr.color == 0);
-
-          if (left_empty && right_empty) {
-            // 両方空いていたらランダムでどちらかに滑る
-            particles[y][x].attr.moment_x = (quickrand() & 1) ? -1 : 1;
-          } else if (left_empty) {
-            particles[y][x].attr.moment_x = -1; // 左に滑る
-          } else if (right_empty) {
-            particles[y][x].attr.moment_x = 1;  // 右に滑る
-          } else {
-            if ((quickrand() & 63) == 0) {
-              particles[y][x].attr.moment_x = -4; // 睡眠状態へ
+            if (left_empty && right_empty) {
+              // 両方空いていたらランダムでどちらかに滑る
+              particles[y][x].attr.moment_x = (quickrand() & 1) ? -1 : 1;
+            } else if (left_empty) {
+              particles[y][x].attr.moment_x = -1; // 左に滑る
+            } else if (right_empty) {
+              particles[y][x].attr.moment_x = 1;  // 右に滑る
             } else {
-              particles[y][x].attr.moment_x = 0;  // まだ起きて微振動のチャンスを残す
+              if ((quickrand() & 63) == 0) {
+                particles[y][x].attr.moment_x = -4; // 睡眠状態へ
+              } else {
+                particles[y][x].attr.moment_x = 0;  // まだ起きて微振動のチャンスを残す
+              }
             }
-          }
 
+          }
         }
       }
-    }
 
-    // 左右が繋がったかチェック (4フレームに1回)
-    if ((counter % 3) == 0) {
+      // 左右が繋がったかチェック (4フレームに1回)
+      if ((counter % 3) == 0) {
 
-      for (int16_t c = 0; c < 4; c++) {   // 4色
+        for (int16_t c = 0; c < 4; c++) {   // 4色
 
-        // 【超高速事前チェック】左端の縦一列に、この色の砂が1粒でもあるか？
-        //uint32_t left_wall_check = 0;
-        //for (int16_t y = 0; y < FIELD_SIZE_Y/2; y++) {
-        //  left_wall_check |= coarse_map[c][y].lo & 1;
-        //}
+          // 【超高速事前チェック】左端の縦一列に、この色の砂が1粒でもあるか？
+          //uint32_t left_wall_check = 0;
+          //for (int16_t y = 0; y < FIELD_SIZE_Y/2; y++) {
+          //  left_wall_check |= coarse_map[c][y].lo & 1;
+          //}
 
-        // 左端に1粒も触れていなければ、その色は開通の可能性ゼロ！
-        // 100回の重い延焼ループを丸ごとスルーして次の色へ！
-        //if (left_wall_check == 0) {
-        //  continue;
-        //}
+          // 左端に1粒も触れていなければ、その色は開通の可能性ゼロ！
+          // 100回の重い延焼ループを丸ごとスルーして次の色へ！
+          //if (left_wall_check == 0) {
+          //  continue;
+          //}
 
-        // 【初期化】各行の「左端（ビット0）に砂がある場所」だけに火をつける
-        for (int16_t y = 0; y < FIELD_SIZE_Y/2; y++) {
-          fire[y].lo = coarse_map[c][y].lo & 1;
-          fire[y].mi = 0;
-          fire[y].hi = 0; 
-        }
-
-        // 延焼ループ（横80bitを流し切るため100回）
-        for (int16_t iter = 0; iter < 100; iter++) {
-
-          int changed = 0; // 変化があったかのフラグ
-
-          for (int16_t y = FIELD_SIZE_Y/2 - 1; y >= 0; y--) {
-
-            BITLINE80 current_sand = coarse_map[c][y]; 
-            BITLINE80 f = fire[y];
-
-            // その行に砂が1粒もなければ、上下左右の計算をすべて飛ばす
-            if (current_sand.lo == 0 && current_sand.mi == 0 && current_sand.hi == 0 &&
-                f.lo == 0 && f.mi == 0 && f.hi == 0) {
-                continue;
-            }
-
-            BITLINE80 next_f;
-
-            // --- 火を「右（ビットが増える方向 = << 1）」へ広げる ---
-            uint32_t carry_lo = f.lo >> 31; // loの最上位は、miの最下位(ビット0)へ
-            uint32_t carry_mi = f.mi >> 31; // miの最上位は、hiの最下位(ビット0)へ
-            
-            next_f.lo = (f.lo << 1);
-            next_f.mi = (f.mi << 1) | carry_lo;
-            next_f.hi = (f.hi << 1) | carry_mi;
-
-            // --- 火を「左（ビットが減る方向 = >> 1）」へ広げる（折り返し用） ---
-            uint32_t borrow_mi = (f.mi & 1) << 31; // miの最下位は、loの最上位(ビット31)へ
-            uint32_t borrow_hi = (f.hi & 1) << 31; // hiの最下位は、miの最上位(ビット31)へ
-
-            next_f.lo |= (f.lo >> 1) | borrow_mi;
-            next_f.mi |= (f.mi >> 1) | borrow_hi;
-            next_f.hi |= (f.hi >> 1);
-
-            // 自分の今の位置の火も保持
-            next_f.lo |= f.lo;
-            next_f.mi |= f.mi;
-            next_f.hi |= f.hi;
-
-            // 砂がない場所の火を消す
-            next_f.lo &= current_sand.lo; 
-            next_f.mi &= current_sand.mi; 
-            next_f.hi &= current_sand.hi; 
-
-            // --- 上下の行から火をもらってくる ---
-            // 上下の行で「お互いに砂が存在するX座標」だけを抽出し、そこを通ってきた火だけを混ぜる
-            if (y > 0)  {
-              BITLINE80 upper_sand = coarse_map[c][y-1];
-              next_f.lo |= (fire[y-1].lo & upper_sand.lo & current_sand.lo);
-              next_f.mi |= (fire[y-1].mi & upper_sand.mi & current_sand.mi);
-              next_f.hi |= (fire[y-1].hi & upper_sand.hi & current_sand.hi);
-            }
-            if (y < (FIELD_SIZE_Y/2 - 1)) {
-              BITLINE80 lower_sand = coarse_map[c][y+1];
-              next_f.lo |= fire[y+1].lo & lower_sand.lo & current_sand.lo;
-              next_f.mi |= fire[y+1].mi & lower_sand.mi & current_sand.mi;
-              next_f.hi |= fire[y+1].hi & lower_sand.hi & current_sand.hi;
-            }
-
-            // もし前回の火のマップから変化があったらフラグを立てる
-            if (next_f.lo != f.lo || next_f.mi != f.mi || next_f.hi != f.hi) {
-              changed = 1;
-            }
-            
-            // 火のマップを更新
-            fire[y].lo = next_f.lo;
-            fire[y].mi = next_f.mi;
-            fire[y].hi = next_f.hi;
+          // 【初期化】各行の「左端（ビット0）に砂がある場所」だけに火をつける
+          for (int16_t y = 0; y < FIELD_SIZE_Y/2; y++) {
+            fire[y].lo = coarse_map[c][y].lo & 1;
+            fire[y].mi = 0;
+            fire[y].hi = 0; 
           }
 
-          // 今回の走査で全く変化がなければ中止
-          if (!changed) break;
-        }
+          // 延焼ループ（横80bitを流し切るため100回）
+          for (int16_t iter = 0; iter < 100; iter++) {
 
-        // 【最終判定】どこか2行が右端（ビット79=hiのビット15）に火が到達していれば開通！
-        int connected = 0;
-        for (int16_t y = FIELD_SIZE_Y/2 - 2; y >= 0; y--) {
-          if ((fire[y].hi & (1 << 15)) && (fire[y+1].hi & (1 << 15))) {
+            int changed = 0; // 変化があったかのフラグ
 
-            clear_freeze_counter = 55;  // タイマーセット
-            fire_c = c;
+            for (int16_t y = FIELD_SIZE_Y/2 - 1; y >= 0; y--) {
 
-            connected = 1;
-            break; // 内側の判定yループを抜ける
+              BITLINE80 current_sand = coarse_map[c][y]; 
+              BITLINE80 f = fire[y];
+
+              // その行に砂が1粒もなければ、上下左右の計算をすべて飛ばす
+              if (current_sand.lo == 0 && current_sand.mi == 0 && current_sand.hi == 0 &&
+                  f.lo == 0 && f.mi == 0 && f.hi == 0) {
+                  continue;
+              }
+
+              BITLINE80 next_f;
+
+              // --- 火を「右（ビットが増える方向 = << 1）」へ広げる ---
+              uint32_t carry_lo = f.lo >> 31; // loの最上位は、miの最下位(ビット0)へ
+              uint32_t carry_mi = f.mi >> 31; // miの最上位は、hiの最下位(ビット0)へ
+              
+              next_f.lo = (f.lo << 1);
+              next_f.mi = (f.mi << 1) | carry_lo;
+              next_f.hi = (f.hi << 1) | carry_mi;
+
+              // --- 火を「左（ビットが減る方向 = >> 1）」へ広げる（折り返し用） ---
+              uint32_t borrow_mi = (f.mi & 1) << 31; // miの最下位は、loの最上位(ビット31)へ
+              uint32_t borrow_hi = (f.hi & 1) << 31; // hiの最下位は、miの最上位(ビット31)へ
+
+              next_f.lo |= (f.lo >> 1) | borrow_mi;
+              next_f.mi |= (f.mi >> 1) | borrow_hi;
+              next_f.hi |= (f.hi >> 1);
+
+              // 自分の今の位置の火も保持
+              next_f.lo |= f.lo;
+              next_f.mi |= f.mi;
+              next_f.hi |= f.hi;
+
+              // 砂がない場所の火を消す
+              next_f.lo &= current_sand.lo; 
+              next_f.mi &= current_sand.mi; 
+              next_f.hi &= current_sand.hi; 
+
+              // --- 上下の行から火をもらってくる ---
+              // 上下の行で「お互いに砂が存在するX座標」だけを抽出し、そこを通ってきた火だけを混ぜる
+              if (y > 0)  {
+                BITLINE80 upper_sand = coarse_map[c][y-1];
+                next_f.lo |= (fire[y-1].lo & upper_sand.lo & current_sand.lo);
+                next_f.mi |= (fire[y-1].mi & upper_sand.mi & current_sand.mi);
+                next_f.hi |= (fire[y-1].hi & upper_sand.hi & current_sand.hi);
+              }
+              if (y < (FIELD_SIZE_Y/2 - 1)) {
+                BITLINE80 lower_sand = coarse_map[c][y+1];
+                next_f.lo |= fire[y+1].lo & lower_sand.lo & current_sand.lo;
+                next_f.mi |= fire[y+1].mi & lower_sand.mi & current_sand.mi;
+                next_f.hi |= fire[y+1].hi & lower_sand.hi & current_sand.hi;
+              }
+
+              // もし前回の火のマップから変化があったらフラグを立てる
+              if (next_f.lo != f.lo || next_f.mi != f.mi || next_f.hi != f.hi) {
+                changed = 1;
+              }
+              
+              // 火のマップを更新
+              fire[y].lo = next_f.lo;
+              fire[y].mi = next_f.mi;
+              fire[y].hi = next_f.hi;
+            }
+
+            // 今回の走査で全く変化がなければ中止
+            if (!changed) break;
           }
-        }
 
-        // 【修正3】この色で消去が発生したら、他の色の処理をせず今回の判定フレームを完了する
-        if (connected) break; 
+          // 【最終判定】どこか2行が右端（ビット79=hiのビット15）に火が到達していれば開通！
+          int connected = 0;
+          for (int16_t y = FIELD_SIZE_Y/2 - 2; y >= 0; y--) {
+            if ((fire[y].hi & (1 << 15)) && (fire[y+1].hi & (1 << 15))) {
+
+              clear_freeze_counter = 55;  // タイマーセット
+              fire_c = c;
+
+              connected = 1;
+              break; // 内側の判定yループを抜ける
+            }
+          }
+
+          // 【修正3】この色で消去が発生したら、他の色の処理をせず今回の判定フレームを完了する
+          if (connected) break; 
+        }
       }
-    }
+    
+    } // if (run_physics) { 
 
     // 追い越しガード
     while (page_calc == page_render) {
