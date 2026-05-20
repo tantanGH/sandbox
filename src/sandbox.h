@@ -3,13 +3,13 @@
 
 #include <stdint.h>
 
-#define VERSION "0.1.2 (2026/05/19)"
+#define VERSION "0.1.4 (2026/05/20)"
 
 #define NUM_SANDS_X (8)
 #define NUM_SANDS_Y (12)
 
-#define FIELD_SIZE_X (NUM_SANDS_X * 10)
-#define FIELD_SIZE_Y (NUM_SANDS_Y * 20)
+#define FIELD_SIZE_X (NUM_SANDS_X * 10)   // 80
+#define FIELD_SIZE_Y (NUM_SANDS_Y * 20)   // 240
 
 // 1粒の砂のデータ構造（16ビット）
 typedef union {
