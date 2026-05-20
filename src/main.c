@@ -70,6 +70,9 @@ static uint16_t screen_buffers[3][FIELD_SIZE_Y][FIELD_SIZE_X] __attribute__((ali
 // ライン単位の書き換えチェック用
 static uint8_t invalidates[3][FIELD_SIZE_Y];
 
+// 色別 1x2 グリッドバッファ
+static BITLINE80 coarse_map[4][FIELD_SIZE_Y/2];
+
 // VSYNC割り込みが「いま現在描画中」の面
 volatile static int16_t page_render = 0;
 
@@ -262,22 +265,44 @@ static void locate_mino(int16_t pos_x, int16_t pos_y, int16_t mino, int16_t rota
   }
 }
 
+// 8x12ドットの範囲に砂を配置
 static void put_particles(int16_t pos_x, int16_t pos_y, int16_t color) {
+  
+  int16_t c_group = color & 3;
+// 【最適化】ループに入る前に、画面外にはみ出さないようにループの範囲自体をクリップする
+  int16_t start_y = (pos_y < 0) ? -pos_y : 0;
+  int16_t end_y   = (pos_y + NUM_SANDS_Y > FIELD_SIZE_Y) ? (FIELD_SIZE_Y - pos_y) : NUM_SANDS_Y;
 
-  // 8x12ドットの範囲に砂を配置
-  for (int16_t sy = 0; sy < NUM_SANDS_Y; sy++) {
-    for (int16_t sx = 0; sx < NUM_SANDS_X; sx++) {
+  int16_t start_x = (pos_x < 0) ? -pos_x : 0;
+  int16_t end_x   = (pos_x + NUM_SANDS_X > FIELD_SIZE_X) ? (FIELD_SIZE_X - pos_x) : NUM_SANDS_X;
 
-      int16_t py = pos_y + sy;
+  for (int16_t sy = start_y; sy < end_y; sy++) {
+
+    int16_t py = pos_y + sy;
+    int16_t cy = py >> 1; // 縦2ドット単位のインデックス
+
+    for (int16_t sx = start_x; sx < end_x; sx++) {
+
       int16_t px = pos_x + sx;
-                      
-      if (px >= 0 && px < FIELD_SIZE_X && py >= 0 && py < FIELD_SIZE_Y) {
-        int16_t c = ((sy % NUM_SANDS_Y) == (NUM_SANDS_Y - 1) || (sx % NUM_SANDS_X) == (NUM_SANDS_X - 1)) ? color * 3 + 1 : ((quickrand() & 7) < 6) ? color * 3 + 2 : color * 3 + 3;
-        particles[py][px].attr.color = c;
-        particles[py][px].attr.moment_y = 0;
-        particles[py][px].attr.moment_x = 0;
-        screen_buffers[page_calc][py][px] = c;
-        invalidates[page_calc][py] = 1;
+
+      // 輝度(t)の決定ロジック
+      int16_t t = ((sy % NUM_SANDS_Y) == (NUM_SANDS_Y - 1) || (sx % NUM_SANDS_X) == (NUM_SANDS_X - 1)) ? 0 : ((quickrand() & 7) < 6) ? 1 : 2;
+      int16_t c = (t << 2) + c_group + 1; // 輝度を混ぜたカラーコード
+
+      // 粒子データと描画バッファの更新
+      particles[py][px].attr.color = c;
+      particles[py][px].attr.moment_y = 0;
+      particles[py][px].attr.moment_x = 0;
+      screen_buffers[page_calc][py][px] = c;
+      invalidates[page_calc][py] = 1;
+
+      // --- 【修正】確実に色グループ（c_group）のビットマップに書き込む ---
+      if (px < 32) {
+        coarse_map[c_group][cy].lo |= (1 << px);
+      } else if (px < 64) {
+        coarse_map[c_group][cy].mi |= (1 << (px - 32));
+      } else {
+        coarse_map[c_group][cy].hi |= (1 << (px - 64));
       }
     }
   }
@@ -409,7 +434,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
   // グラフィックパレット設定
   for (int16_t i = 0; i < 16; i++) {
-    _iocs_gpalet(i, palette_colors1[i]);
+    _iocs_gpalet(i, graphic_palette_colors[i]);
   }
   
   // 物理演算バッファ初期化
@@ -419,10 +444,16 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   memset(screen_buffers, 0, 2 * FIELD_SIZE_Y * FIELD_SIZE_X * sizeof(uint16_t));
   memset(invalidates, 0, 2 * FIELD_SIZE_Y * sizeof(uint8_t));
 
+  // 色別グリッドバッファ初期化
+  memset(coarse_map, 0, 4 * FIELD_SIZE_Y / 2 * sizeof(BITLINE80));
+
   // 画面オフセット
   int16_t grid_x = 6;
   int16_t grid_y = 0;
+
+  // カウンタ
   uint32_t counter = 0;
+  uint32_t clear_freeze_counter = 0;
 
   // スプライト色と位置
   int16_t sp_mino = -1;
@@ -441,6 +472,10 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   block_event_new = 0;
   block_event_delete = 0;
 
+  // 探索用の「火が燃え広がっているマップ」
+  static BITLINE80 fire[FIELD_SIZE_Y/2];
+  int16_t fire_c = -1;
+
   // VSYNC割り込み開始
   int16_t vsync = 0;
   if (_iocs_vdispst((uint8_t*)refresh_screen, 0, 1) != 0) {
@@ -456,6 +491,75 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
     // SHIFTキーが押されたら終了
     if (_iocs_b_sftsns() & 0x01) break; 
+
+    // 左右開通時のフリーズタイマーチェック
+    if (clear_freeze_counter > 0) {
+
+      clear_freeze_counter--;
+
+      if (clear_freeze_counter == 0 && fire_c >= 0) {
+
+        for (int16_t y = FIELD_SIZE_Y / 2 - 1; y >= 0; y--) {
+
+          BITLINE80 f = fire[y];
+
+          // この行に火（繋がっているドット）が1つもなければ、行丸ごとスキップ
+          if (f.lo == 0 && f.mi == 0 && f.hi == 0) continue;
+
+          // 縦2ドット分の画面Y座標を復元
+          int16_t py0 = y << 1;
+          int16_t py1 = py0 + 1;
+
+          // 横80ドットを走査
+          for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
+            int is_fired = 0;
+
+            // px に応じてビットが立っているかチェック
+            if (px < 32) {
+              if (f.lo & (1 << px)) is_fired = 1;
+            } else if (px < 64) {
+              if (f.mi & (1 << (px - 32))) is_fired = 1;
+            } else {
+              if (f.hi & (1 << (px - 64))) is_fired = 1;
+            }
+
+            // 火が通っていた場所＝消去対象！
+            if (is_fired) {
+
+              // 【ウェイクアップ処理】消去する空間の「すぐ上のドット」を叩き起こす！
+              int16_t upper_y = py0 - 1;
+              if (upper_y >= 0) {
+                  // もし真上に砂が存在し、かつそれがスリープ状態なら
+                  if (particles[upper_y][px].raw != 0 && particles[upper_y][px].attr.moment_x == -4) {
+                      particles[upper_y][px].attr.moment_x = 0; // スリープ解除！
+                      
+                      // 動き出すので、そのラインも再描画・物理対象に含める
+                      invalidates[page_calc][upper_y] = 1;
+                  }
+              }
+
+              // 1. 粒子データを消す（縦2ドット分）
+              particles[py0][px].raw = 0;
+              if (py1 < FIELD_SIZE_Y) particles[py1][px].raw = 0;
+
+              // 2. 画面描画バッファを黒（0）に戻す
+              screen_buffers[page_calc][py0][px] = 0;
+              if (py1 < FIELD_SIZE_Y) screen_buffers[page_calc][py1][px] = 0;
+
+              // 3. このラインを再描画対象にする
+              invalidates[page_calc][py0] = 1;
+              if (py1 < FIELD_SIZE_Y) invalidates[page_calc][py1] = 1;
+            }
+          }
+
+          memset(&coarse_map[fire_c],0,sizeof(BITLINE80)*FIELD_SIZE_Y/2);
+          fire_c = -1;
+          goto refresh;
+        }
+      }
+
+      continue;
+    }
 
     // ブロック操作
     if (sp_mino >= 0) {
@@ -685,7 +789,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
             
             // 完全に同じマス内の動きなので、GVRAMへの転送（invalidate）は不要！！
             // （ドット単位の描画は次のグリッド移動時に反映されるため、ここでラインを汚す必要はありません）
-            screen_buffers[page_calc][y][x] = particles[y][x].attr.color;
+            //screen_buffers[page_calc][y][x] = particles[y][x].attr.color;
 
           } else {
 
@@ -705,6 +809,24 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
             // マスが変わったので、元いたラインと、移動先のラインを再描画対象にする
             invalidates[page_calc][y] = 1;
             invalidates[page_calc][next_y_hi] = 1;
+
+            // 色別グリッドバッファに書き込む (元のグリッドからは消さない) ---
+            int16_t c       = (tmp.attr.color - 1) & 3; // 4色グループへのマスク
+            int16_t next_cy = next_y_hi >> 1;     // 縦は2ドット単位なので「>> 1」(120行)
+
+            // 移動先のX座標を基準に、lo / mi / hi へ綺麗に振り分ける
+            if (next_x_hi < 32) {
+              // 0 〜 31 ドット目：loレジスタ
+              coarse_map[c][next_cy].lo |= (1 << next_x_hi);
+            } 
+            else if (next_x_hi < 64) {
+              // 32 〜 63 ドット目：miレジスタ（32を引いて 0〜31番目のビットにする）
+              coarse_map[c][next_cy].mi |= (1 << (next_x_hi - 32));
+            } 
+            else {
+              // 64 〜 79 ドット目：hiレジスタ（64を引いて 0〜15番目のビットにする）
+              coarse_map[c][next_cy].hi |= (1 << (next_x_hi - 64));
+            }
             
             // ★【前述のウェイクアップ処理を入れるならここ！】
             // 実際に別のマスへ移動が起きたので、周囲の砂を起こす
@@ -757,24 +879,119 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
       }
     }
 
-    // 左右が繋がったかチェック
-    for (int16_t y = FIELD_SIZE_Y-1; y >= 0; y--) {
+    // 左右が繋がったかチェック (4フレームに1回)
+    if ((counter % 3) == 0) {
 
-      uint8_t c = particles[y][0].attr.color;
+      for (int16_t c = 0; c < 4; c++) {
 
-      if (c == 0) {
-        // 左端に砂はない
-        continue;
-      }
+        // 【超高速事前チェック】左端の縦一列に、この色の砂が1粒でもあるか？
+        uint32_t left_wall_check = 0;
+        for (int y = 0; y < FIELD_SIZE_Y/2; y++) {
+          left_wall_check |= coarse_map[c][y].lo & 1;
+        }
 
-      for (int16_t x = 1; x < FIELD_SIZE_X; x++) {
-        if (particles[y][x] == c ||
-            )
+        // 左端に1粒も触れていなければ、その色は開通の可能性ゼロ！
+        // 100回の重い延焼ループを丸ごとスルーして次の色へ！
+        if (left_wall_check == 0) {
+          continue;
+        }
+
+        // 【初期化】各行の「左端（ビット0）に砂がある場所」だけに火をつける
+        for (int y = 0; y < FIELD_SIZE_Y/2; y++) {
+          fire[y].lo = coarse_map[c][y].lo & 1;
+          fire[y].mi = 0;
+          fire[y].hi = 0; 
+        }
+
+        // 延焼ループ（横80bitを流し切るため100回）
+        for (int iter = 0; iter < 100; iter++) {
+
+          int changed = 0; // 変化があったかのフラグ
+
+          for (int y = 0; y < FIELD_SIZE_Y/2; y++) {
+
+            BITLINE80 current_sand = coarse_map[c][y]; 
+            BITLINE80 f = fire[y];
+
+            // その行に砂が1粒もなければ、上下左右の計算をすべて飛ばす
+            if (current_sand.lo == 0 && current_sand.mi == 0 && current_sand.hi == 0 &&
+                fire[y].lo == 0 && fire[y].mi == 0 && fire[y].hi == 0) {
+                continue;
+            }
+
+            BITLINE80 next_f;
+
+            // --- 【② 左右延焼】火を「右（ビットが増える方向 = << 1）」へ広げる ---
+            uint32_t carry_lo = f.lo >> 31; // loの最上位は、miの最下位(ビット0)へ
+            uint32_t carry_mi = f.mi >> 31; // miの最上位は、hiの最下位(ビット0)へ
+            
+            next_f.lo = (f.lo << 1);
+            next_f.mi = (f.mi << 1) | carry_lo;
+            next_f.hi = (f.hi << 1) | carry_mi;
+
+            // --- 火を「左（ビットが減る方向 = >> 1）」へ広げる（折り返し用） ---
+            uint32_t borrow_hi = (f.hi & 1) << 31; // hiの最下位は、miの最上位(ビット31)へ
+            uint32_t borrow_mi = (f.mi & 1) << 31; // miの最下位は、loの最上位(ビット31)へ
+
+            next_f.lo |= (f.lo >> 1) | borrow_mi;
+            next_f.mi |= (f.mi >> 1) | borrow_hi;
+            next_f.hi |= (f.hi >> 1);
+
+            // 自分の今の位置の火も保持
+            next_f.lo |= f.lo;
+            next_f.mi |= f.mi;
+            next_f.hi |= f.hi;
+
+            // 砂がない場所の火を消す
+            next_f.lo &= current_sand.lo; 
+            next_f.mi &= current_sand.mi; 
+            next_f.hi &= current_sand.hi; 
+
+            // --- 【③ 上下延焼】上下の行から火をもらってくる ---
+            if (y > 0)  {
+              BITLINE80 upper_sand = coarse_map[c][y-1];
+              // 上下の行で「お互いに砂が存在するX座標」だけを抽出し、そこを通ってきた火だけを混ぜる
+              next_f.lo |= (fire[y-1].lo & upper_sand.lo & current_sand.lo);
+              next_f.mi |= (fire[y-1].mi & upper_sand.mi & current_sand.mi);
+              next_f.hi |= (fire[y-1].hi & upper_sand.hi & current_sand.hi);
+            }
+            if (y < (FIELD_SIZE_Y/2 - 1)) {
+              BITLINE80 lower_sand = coarse_map[c][y-1];
+              next_f.lo |= fire[y+1].lo & lower_sand.lo & current_sand.lo;
+              next_f.mi |= fire[y+1].mi & lower_sand.mi & current_sand.mi;
+              next_f.hi |= fire[y+1].hi & lower_sand.hi & current_sand.hi;
+            }
+
+            // もし前回の火のマップから変化があったらフラグを立てる
+            if (next_f.lo != f.lo || next_f.mi != f.mi || next_f.hi != f.hi) {
+              changed = 1;
+            }
+            
+            // 火のマップを更新
+            fire[y].lo = next_f.lo;
+            fire[y].mi = next_f.mi;
+            fire[y].hi = next_f.hi;
+          }
+
+          if (!changed) break;
+        }
+
+        // 【最終判定】どこか2行が右端（ビット79）に火が到達していれば開通！
+        for (int y = FIELD_SIZE_Y/2 - 2; y >= 0; y--) {
+          if ((fire[y].hi & (1 << 15)) && (fire[y+1].hi & (1 << 15))) {
+            clear_freeze_counter = 55;  // タイマーセット
+            fire_c = c;
+            break;
+          }
+        }
+
+        if (clear_freeze_counter > 0) break;
+
       }
 
     }
 
-
+    refresh:
     // 追い越しガード
     while (page_calc == page_render) {
         // 060が速すぎる場合、次のVSYNCが来て割り込みが page_next を

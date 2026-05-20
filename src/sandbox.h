@@ -26,4 +26,11 @@ typedef union {
 
 } PARTICLE;
 
+// 連結チェック用80(96)ビット構造
+typedef struct {
+  uint32_t lo;
+  uint32_t mi;
+  uint32_t hi;
+} BITLINE80;
+
 #endif
