@@ -412,12 +412,13 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   put_text(144,40,2,1,"SCORE");
   put_text(144,72,2,1,"NEXT");
 
+  // ハイスコア
+  uint32_t hi_score = 76500;
 
 game_start:
 
-  // ハイスコア
+  // ハイスコア表示
   static uint8_t score_mes[256];
-  uint32_t hi_score = 76500;
   sprintf(score_mes,"%8d",hi_score);
   put_text(144,16,3,1,score_mes);
 
