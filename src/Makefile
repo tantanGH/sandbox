@@ -7,7 +7,7 @@ endif
 .SUFFIXES:
 
 # バージョン
-VERSION = 010
+VERSION = 020
 
 # 実行ファイル名
 TARGET_FILE = SANDBOX.X
@@ -36,7 +36,7 @@ C_SRCS = main.c
 ASM_SRCS = 
 
 # *.h source files
-HEADER_SRCS = pattern.h sandbox.h
+HEADER_SRCS = keyboard.h pattern.h sandbox.h
 
 # リンク対象のライブラリファイル
 LIBS =
@@ -50,6 +50,7 @@ OBJS =	$(addprefix $(INTERMEDIATE_DIR)/,$(patsubst %.c,%.o,$(C_SRCS))) \
 
 # コンパイルフラグ
 COMMON_FLAGS = -m68060 -O2 -msoft-float -specs=nano.specs $(INCLUDE_FLAGS) -fno-defer-pop
+#COMMON_FLAGS = -m68060 -O2 -msoft-float $(INCLUDE_FLAGS) -fno-defer-pop
 CFLAGS = $(COMMON_FLAGS)
 
 # デフォルトのターゲット
