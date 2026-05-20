@@ -10,13 +10,7 @@
 #include "sandbox.h"
 #include "pattern.h"
 #include "keyboard.h"
-//#include "pcm_data.h"
-
-// 8x8 normal font data
-static struct iocs_fntbuf font_data_8x8[ 256 ];
-
-// 8x8 bold font data
-static struct iocs_fntbuf font_data_8x8_bold[ 256 ];
+#include "crtc.h"
 
 // 物理演算用バッファ
 static PARTICLE particles[FIELD_SIZE_Y][FIELD_SIZE_X]; 
@@ -24,22 +18,34 @@ static PARTICLE particles[FIELD_SIZE_Y][FIELD_SIZE_X];
 // 描画用トリプルバッファ
 static uint16_t screen_buffers[3][FIELD_SIZE_Y][FIELD_SIZE_X] __attribute__((aligned(16)));
 
-// ライン単位の書き換えチェック用
+// ライン単位の書き換えチェック用トリプルバッファ
 static uint8_t invalidates[3][FIELD_SIZE_Y];
 
-// 色別 1x2 グリッドバッファ
+// 左右開通判定用 色別 1x2 ビットマップグリッドバッファ
 static BITLINE80 coarse_map[4][FIELD_SIZE_Y/2];
 
-// VSYNC割り込みが「いま現在描画中」の面
+// 左右開通探索用 火が燃え広がってるバッファ
+static BITLINE80 fire[FIELD_SIZE_Y/2];
+
+// VSYNC割り込みが「いま現在描画中」のページ
 volatile static int16_t page_render = 0;
 
-// メインループが「いま現在書き込み中」の面
+// メインループが「いま現在書き込み中」のページ
 volatile static int16_t page_calc = 1;
 
-// VSYNC割り込みが「次に描画する」の面
+// VSYNC割り込みが「次に描画する」ページ
 volatile static int16_t page_next = 2;
 
-// グローバル変数として乱数の状態を持つ（初期値は0以外なら何でもOK）
+// スコア文字列表示用テキストバッファ
+static uint8_t score_mes[ 256 ];
+
+// 8x8 normal font data
+static struct iocs_fntbuf font_data_8x8[ 256 ];
+
+// 8x8 bold font data
+static struct iocs_fntbuf font_data_8x8_bold[ 256 ];
+
+// クイック乱数用シード
 static uint32_t quickrand_seed = 2463534242;
 
 // Xorshift32をインライン関数で定義
@@ -50,25 +56,40 @@ static inline uint32_t quickrand(void) {
     return quickrand_seed;
 }
 
+// VSYNC割り込みハンドラに伝えるイベントフラグ
 static volatile int16_t block_event_new = 0;
 static volatile int16_t block_event_delete = 0;
 static volatile int16_t block_event_next = 0;
 
-static volatile int16_t sp_color = -1;
+// ミノスプライトの現在位置とカラー
 static int16_t sp_x[4];          // 各ブロックの位置
 static int16_t sp_y[4];          // 各ブロックの位置
+static volatile int16_t sp_color = -1;
 
-static int16_t sp_color_next = -1;
+// ミノスプライト(NEXT)の現在位置とカラー
 static int16_t sp_x_next[4];          // 各ブロックの位置(NEXT)
 static int16_t sp_y_next[4];          // 各ブロックの位置(NEXT)
+static int16_t sp_color_next = -1;
 
-// VSYNC割り込みハンドラ
+//
+//  タイマーAリセット
+//
+static void reset_timer_a() {
+  // タイマーAをリセットしておかないと、ハードリセット後にVSYNC割り込みがすぐに開始しない
+  _iocs_b_bpoke((uint8_t*)0xe88019,0x00);  // stop Timer-A  
+  _iocs_b_bpoke((uint8_t*)0xe8801f,0x01);  // set Timer-A counter        
+  _iocs_b_bpoke((uint8_t*)0xe88019,0x18);  // restart Timer-A    
+}
+
+//
+//  VSYNC割り込みハンドラ
+//
 static void __attribute__((interrupt)) refresh_screen() {
 
-  // スプライトの処理
+  // 次のミノを表示する必要があるか？
   if (block_event_next) {
 
-    // 次のミノを表示
+    // 次のミノを表示 (スプライト番号4~7)
     SP_SCRL[ 16 ] = sp_x_next[0];
     SP_SCRL[ 17 ] = sp_y_next[0];
     SP_SCRL[ 18 ] = 0x100 + sp_color_next;
@@ -92,9 +113,10 @@ static void __attribute__((interrupt)) refresh_screen() {
     block_event_next = 0;
   }
 
+  // 現在のミノを消す必要があるか？
   if (block_event_delete) {
 
-    // 消去
+    // スプライト番号 0~3 を消去
     SP_SCRL[  3 ] = 0;
     SP_SCRL[  7 ] = 0;
     SP_SCRL[ 11 ] = 0;
@@ -103,8 +125,10 @@ static void __attribute__((interrupt)) refresh_screen() {
     block_event_delete = 0;
 
   } else if (block_event_new) {
+  
+    // 新しい位置にミノを表示する必要があるか？
 
-    // 新規作成
+    // 新規作成 (スプライト番号 0~3)
     SP_SCRL[  0 ] = sp_x[0];
     SP_SCRL[  1 ] = sp_y[0];
     SP_SCRL[  2 ] = 0x100 + sp_color;
@@ -129,7 +153,7 @@ static void __attribute__((interrupt)) refresh_screen() {
 
   } else if (sp_color >= 0) {
 
-    // 通常落下
+    // 消去でも新規表示でもないけど、存在しているならば移動のみ
     SP_SCRL[  0 ] = sp_x[0];
     SP_SCRL[  1 ] = sp_y[0];
 
@@ -146,11 +170,15 @@ static void __attribute__((interrupt)) refresh_screen() {
 
   // グラフィック画面差分描画
   if (page_render != page_next) {
+    // 次の待機ページを今回の描画ページとする
     page_render = page_next;
   }
-  uint64_t* gp = (uint64_t*)0xC00030;
+
+  // グラフィック画面書き込み基準位置は右に少しオフセット
+  uint64_t* gp = (uint64_t*)(GVRAM + 0x30);
   uint64_t* fp = (uint64_t*)&screen_buffers[page_render];
   for (uint16_t y = 0; y < FIELD_SIZE_Y; y++) {
+    // 無効化判定フラグの立ったラインのみ転送する (64bit(4ドット) * 20 = 横80ドット)
     if (invalidates[page_render][y]) {
       *gp++ = *fp++;
       *gp++ = *fp++;
@@ -174,11 +202,13 @@ static void __attribute__((interrupt)) refresh_screen() {
       *gp++ = *fp++;
       *gp++ = *fp++;
 
-      gp += 512/4 - FIELD_SIZE_X/4;
+      gp += 512/4 - FIELD_SIZE_X/4;       // 次のラインにポインタ移動
 
-      invalidates[page_render][y] = 0;
+      invalidates[page_render][y] = 0;    // 無効化フラグを寝かせておく
 
     } else {
+
+      // 書き換える必要がなかったラインはポインタの移動のみ
 
       gp += 512/4;
       fp += FIELD_SIZE_X/4;
@@ -188,7 +218,9 @@ static void __attribute__((interrupt)) refresh_screen() {
 
 }
 
-// ミノを置けるかのチェック
+//
+//  ミノを置けるかのチェック (0:置けない 1:置ける)
+//
 static int16_t locate_mino_check(int16_t pos_x, int16_t pos_y, int16_t mino, int16_t rotation) {
 
   uint16_t pattern = MINO_TABLE[mino][rotation];
@@ -198,26 +230,41 @@ static int16_t locate_mino_check(int16_t pos_x, int16_t pos_y, int16_t mino, int
 
   // 4x4の格子をスキャン
   for (int i = 0; i < 16; i++) {
+
     // ビットが立っているか（最上位ビットからチェック）
     if (pattern & (0x8000 >> i)) {
       int block_x = i % 4;
       int block_y = i / 4;
             
-      // 画面上の実際のスプライト座標
+      // 画面上の実際のスプライト座標を設定
       x[sp_index] = pos_x + block_x * NUM_SANDS_X;
       y[sp_index] = pos_y + block_y * NUM_SANDS_Y;
       sp_index++;
     }
   }
 
-  if (x[0] < 16+24 || x[1] < 16+24 || x[2] < 16+24 || x[3] < 16+24) return 0;
-  if (x[0]+8 > 16+24+80 || x[1]+8 > 16+24+80 || x[2]+8 > 16+24+80 || x[3]+8 > 16+24+80) return 0;
-  if (y[0]+12 > 16+240 || y[1]+12 > 16+240 || y[2]+12 > 16+240 || y[3]+12 > 16+240) return 0;
+  // もしフィールド外にはみだしてしまうようならダメ
+  if (x[0] < SP_OFS_X || 
+      x[1] < SP_OFS_X || 
+      x[2] < SP_OFS_X || 
+      x[3] < SP_OFS_X) return 0;
+
+  if (x[0] + NUM_SANDS_X > SP_OFS_X + FIELD_SIZE_X || 
+      x[1] + NUM_SANDS_X > SP_OFS_X + FIELD_SIZE_X || 
+      x[2] + NUM_SANDS_X > SP_OFS_X + FIELD_SIZE_X || 
+      x[3] + NUM_SANDS_X > SP_OFS_X + FIELD_SIZE_X) return 0;
+
+  if (y[0] + NUM_SANDS_Y > SP_OFS_Y + FIELD_SIZE_Y || 
+      y[1] + NUM_SANDS_Y > SP_OFS_Y + FIELD_SIZE_Y ||
+      y[2] + NUM_SANDS_Y > SP_OFS_Y + FIELD_SIZE_Y ||
+      y[3] + NUM_SANDS_Y > SP_OFS_Y + FIELD_SIZE_Y) return 0;
 
   return 1;
 }
 
-// ミノを設置する
+//
+//  ミノを設置する (座標の設定のみ、実際の表示はVSYNC割り込みハンドラー内で)
+//
 static void locate_mino(int16_t pos_x, int16_t pos_y, int16_t mino, int16_t rotation, int16_t sp_x[], int16_t sp_y[]) {
 
   uint16_t pattern = MINO_TABLE[mino][rotation];
@@ -225,22 +272,28 @@ static void locate_mino(int16_t pos_x, int16_t pos_y, int16_t mino, int16_t rota
     
   // 4x4の格子をスキャン
   for (int i = 0; i < 16; i++) {
+
     // ビットが立っているか（最上位ビットからチェック）
     if (pattern & (0x8000 >> i)) {
       int block_x = i % 4;
       int block_y = i / 4;
             
-      // 画面上の実際のスプライト座標
+      // 画面上の実際のスプライト座標を設定
       sp_x[sp_index] = pos_x + block_x * NUM_SANDS_X;
       sp_y[sp_index] = pos_y + block_y * NUM_SANDS_Y;
       sp_index++;
     }
   }
+
+  // 実際の表示はVSYNC割り込みハンドラーにまかせる
 }
 
-// 8x12ドットの範囲に砂を配置する
+//
+//  8x12ドットの範囲に砂を配置する
+//
 static void put_particles(int16_t pos_x, int16_t pos_y, int16_t color) {
   
+  // 色グループ (bit0,1)
   int16_t c_group = color & 3;
 
   //　ループに入る前に、画面外にはみ出さないようにループの範囲自体をクリップする
@@ -253,7 +306,7 @@ static void put_particles(int16_t pos_x, int16_t pos_y, int16_t color) {
   for (int16_t sy = start_y; sy < end_y; sy++) {
 
     int16_t py = pos_y + sy;
-    int16_t cy = py >> 1; // 縦2ドット単位のインデックス
+//    int16_t cy = py >> 1; // 縦2ドット単位のインデックス
 
     for (int16_t sx = start_x; sx < end_x; sx++) {
 
@@ -261,7 +314,9 @@ static void put_particles(int16_t pos_x, int16_t pos_y, int16_t color) {
 
       // 輝度(t)の決定ロジック
       int16_t t = ((sy % NUM_SANDS_Y) == (NUM_SANDS_Y - 1) || (sx % NUM_SANDS_X) == (NUM_SANDS_X - 1)) ? 0 : ((quickrand() & 7) < 6) ? 1 : 2;
-      int16_t c = (t << 2) + c_group + 1; // 輝度を混ぜたカラーコード
+
+      // 輝度を混ぜたカラーコード
+      int16_t c = (t << 2) + c_group + 1; 
 
       // 粒子データと描画バッファの更新
       particles[py][px].attr.color = c;
@@ -271,19 +326,48 @@ static void put_particles(int16_t pos_x, int16_t pos_y, int16_t color) {
       invalidates[page_calc][py] = 1;
 
       // 色グループ（c_group）のビットマップに書き込む
-      if (px < 32) {
-        coarse_map[c_group][cy].lo |= (1 << px);
-      } else if (px < 64) {
-        coarse_map[c_group][cy].mi |= (1 << (px - 32));
-      } else {
-        coarse_map[c_group][cy].hi |= (1 << (px - 64));
-      }
+//      if (px < 32) {
+//        coarse_map[c_group][cy].lo |= (1 << px);
+//      } else if (px < 64) {
+//        coarse_map[c_group][cy].mi |= (1 << (px - 32));
+//      } else {
+//        coarse_map[c_group][cy].hi |= (1 << (px - 64));
+//      }
+
+      // 左右開通判定が甘くなりすぎないように、いったんここではビットマップグリッドへの書き込みはやめておく
+
     }
   }
 }
 
-// put text in 8x8 font
-void put_text(uint16_t x, uint16_t y, uint16_t color, uint16_t bold, const uint8_t* text) {
+//
+//  8x8 フォントデータ初期化 (スーパーバイザモードになっていること)
+//
+static void init_font_8x8() {
+
+  for (int16_t i = 0; i < 256; i++) {
+
+    // 8x8 regular font
+    font_data_8x8[i].xl = 8;
+    font_data_8x8[i].yl = 8;
+    memcpy(font_data_8x8[i].buffer, FONT_ADDR_8x8 + FONT_BYTES_8x8 * i, FONT_BYTES_8x8);
+
+    // 8x8 bold font
+    font_data_8x8_bold[i].xl = 8;
+    font_data_8x8_bold[i].yl = 8;
+    memcpy(font_data_8x8_bold[i].buffer, FONT_ADDR_8x8 + FONT_BYTES_8x8 * i, FONT_BYTES_8x8);
+    for (int16_t j = 0; j < FONT_BYTES_8x8; j++) {
+      font_data_8x8_bold[i].buffer[j] |= ( font_data_8x8_bold[i].buffer[j] >> 1 ) & 0xff;
+    }
+
+  }
+  
+}
+
+//
+//  put text in 8x8 font
+//
+static void put_text_8x8(uint16_t x, uint16_t y, uint16_t color, uint16_t bold, const uint8_t* text) {
 
   int16_t len = strlen(text);
 
@@ -304,55 +388,11 @@ void put_text(uint16_t x, uint16_t y, uint16_t color, uint16_t bold, const uint8
 }
 
 //
-//  main
+//  PCG / スプライトの初期化 (スーパーバイザモードになっていること)
 //
-int32_t main(int32_t argc, uint8_t* argv[]) {
+static void init_sp_pcg() {
 
-  int32_t rc = 1;
-  int32_t usp = -1;
-  int32_t funckey_mode = -1;
- 
-  // random seed初期化
-  srand(_iocs_ontime().sec);
-  quickrand_seed = rand();
-
-  // ファンクションキー表示モード取得
-  funckey_mode = _dos_c_fnkmod(-1);
-
-  // スーパーバイザ移行
-  usp = _iocs_b_super(0);
-
-  // ファンクションキー表示OFF
-  _dos_c_fnkmod(3);
-
-  // カーソル表示OFF
-  _dos_c_curoff();
-
-  // 256x256 16色モード (グラフィック横512)
-  _iocs_crtmod(6);
-  _iocs_g_clr_on();
-
-  // テキスト消去
-  _dos_c_cls_al();
-
-  // 8x8 フォントの初期化
-  for (int16_t i = 0; i < 256; i++) {
-
-    // 8x8 regular font
-    font_data_8x8[i].xl = 8;
-    font_data_8x8[i].yl = 8;
-    memcpy(font_data_8x8[i].buffer, FONT_ADDR_8x8 + FONT_BYTES_8x8 * i, FONT_BYTES_8x8);
-
-    // 8x8 bold font
-    font_data_8x8_bold[i].xl = 8;
-    font_data_8x8_bold[i].yl = 8;
-    memcpy(font_data_8x8_bold[i].buffer, FONT_ADDR_8x8 + FONT_BYTES_8x8 * i, FONT_BYTES_8x8);
-    for (int16_t j = 0; j < FONT_BYTES_8x8; j++) {
-      font_data_8x8_bold[i].buffer[j] |= ( font_data_8x8_bold[i].buffer[j] >> 1 ) & 0xff;
-    }
-
-  }
-  
+  // VBLANK待ち
   WAIT_VBLANK;
 
   // SP:ON TX:ON GR0:ON
@@ -402,75 +442,202 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
   *BG_CTRL = 0x203;   // SP/BG ON, BG1-BGTEXT0, BG0-BGTEXT1, BG1 OFF, BG0 ON 
 
-  // グラフィックパレット設定
+}
+
+//
+//  グラフィックパレットの初期化
+//
+static void init_g_palette() {
   for (int16_t i = 0; i < 16; i++) {
     _iocs_gpalet(i, graphic_palette_colors[i]);
   }
+}
 
-  // テキスト表示
-  put_text(144,8,2,1,"HI SCORE");
-  put_text(144,40,2,1,"SCORE");
-  put_text(144,72,2,1,"NEXT");
+//
+//  テキストラベル初期化
+//
+static void init_text_labels() {
+  put_text_8x8(144,8,2,1,"HI SCORE");
+  put_text_8x8(144,40,2,1,"SCORE");
+  put_text_8x8(144,72,2,1,"NEXT");
+}
 
-  // ハイスコア
-  uint32_t hi_score = 76500;
+//
+//  sprintf(buf,"%0Xd",val) の置き換え用
+//
+static void int_to_ascii_right(uint8_t* buf, int16_t digits, uint32_t val) {
+
+  // 文字列の末尾（ヌル文字）をセット
+  buf[digits] = '\0';
+
+  // 右詰め（下の桁）から逆順にバッファを埋めていく
+  for (int16_t i = digits - 1; i >= 0; i--) {
+    if (val > 0 || i == digits - 1) { 
+      // 値がまだ残っている、または一の位のときは数字に変換
+      buf[i] = '0' + (val % 10);
+      val /= 10;
+    } else {
+      // 値がもう無くなった（上位の余った桁）はスペースで埋める（右詰め演出）
+      buf[i] = ' ';
+    }
+  }
+}
+
+//
+//  ゲーム開始待機画面
+//
+static int16_t wait_game_start() {
+
+  put_text_8x8(8,128,3,1,"PUSH SPACE KEY");
+
+  for (;;) {
+    if (_iocs_b_keysns() != 0) {
+      int16_t scan_code = _iocs_b_keyinp() >> 8;
+      if (scan_code == KEY_SCAN_CODE_SPACE) {
+        break;
+      } else if (scan_code == KEY_SCAN_CODE_ESC) {
+        return -1;
+      }
+    }
+    if ((_iocs_joyget(0) & 0x20) == 0) break;
+  }
+
+  put_text_8x8(8,128,3,1,"              ");
+
+  return 0;
+}
+
+//
+//  ゲームオーバー待機画面
+//
+static int16_t wait_game_over() {
+  
+  put_text_8x8(28,128,3,1,"GAME OVER");
+  
+  for (;;) {
+    if (_iocs_b_keysns() != 0) {
+      int16_t scan_code = _iocs_b_keyinp() >> 8;
+      if (scan_code == KEY_SCAN_CODE_SPACE) {
+        break;
+      } else if (scan_code == KEY_SCAN_CODE_ESC) {
+        return -1;
+      }
+    }
+    if ((_iocs_joyget(0) & 0x20) == 0) break;
+  }
+
+  put_text_8x8(28,128,3,1,"         ");
+
+  return 0;
+}
+
+//
+//  main
+//
+int32_t main(int32_t argc, uint8_t* argv[]) {
+
+  // アプリケーションの終了コード
+  int32_t rc = 1;
+
+  // ユーザースタックポインタ保存用
+  int32_t usp = -1;
+
+  // VSYNC割り込み使用開始したかフラグ
+  int16_t vsync = 0;
+
+  // random seed初期化
+  srand(_iocs_ontime().sec);
+  quickrand_seed = rand();
+
+  // オリジナルのファンクションキー表示モード保存
+  int32_t funckey_mode = _dos_c_fnkmod(-1);
+
+  // ファンクションキー表示OFF
+  _dos_c_fnkmod(3);
+
+  // カーソル表示OFF
+  _dos_c_curoff();
+
+  // 256x256 16色モード (グラフィック横512)
+  _iocs_crtmod(6);
+  _iocs_g_clr_on();
+
+  // テキスト消去
+  _dos_c_cls_al();
+ 
+  // スーパーバイザ移行
+  usp = _iocs_b_super(0);
+
+  // 8x8 フォントの初期化
+  init_font_8x8();
+
+  // SP/PCGの初期化
+  init_sp_pcg();
+
+  // グラフィックパレット初期化
+  init_g_palette();
+
+  // テキストラベル初期化
+  init_text_labels();
+
+  // ハイスコア初期設定
+  uint32_t hi_score = DEFAULT_HI_SCORE;
+
 
 game_start:
 
-  // ハイスコア表示
-  static uint8_t score_mes[256];
-  sprintf(score_mes,"%8d",hi_score);
-  put_text(144,16,3,1,score_mes);
+  // ハイスコア表示(値の初期化はしない)
+  int_to_ascii_right(score_mes,8,hi_score);
+  put_text_8x8(144,16,3,1,score_mes);
 
-  // スコア
+  // スコア初期化
   uint32_t score = 0;
-  sprintf(score_mes,"%8d",score);
-  put_text(144,48,3,1,score_mes);
+  int_to_ascii_right(score_mes,8,score);
+  put_text_8x8(144,48,3,1,score_mes);
   
-  // 物理演算バッファ初期化
-  memset(particles, 0, FIELD_SIZE_Y * FIELD_SIZE_X * sizeof(PARTICLE));
+  // 物理演算バッファ(1面のみ)初期化
+  memset(particles, 0, sizeof(PARTICLE) * FIELD_SIZE_Y * FIELD_SIZE_X);
 
-  // 画面描画ダブルバッファ初期化
-  memset(screen_buffers, 0, 2 * FIELD_SIZE_Y * FIELD_SIZE_X * sizeof(uint16_t));
-  memset(invalidates, 1, 2 * FIELD_SIZE_Y * sizeof(uint8_t));
+  // 画面描画トリプルバッファ初期化
+  memset(screen_buffers, 0, 3 * sizeof(uint16_t) * FIELD_SIZE_Y * FIELD_SIZE_X);
 
-  // 色別グリッドバッファ初期化
-  memset(coarse_map, 0, 4 * FIELD_SIZE_Y / 2 * sizeof(BITLINE80));
+  // 差分描画用バッファ初期化(最初は画面クリアのために全ライン表示対象(1)とする)
+  memset(invalidates, 1, 3 * sizeof(uint8_t) * FIELD_SIZE_Y);   
 
-  // 画面オフセット
-  int16_t grid_x = 6;
-  int16_t grid_y = 0;
+  // 色別(4色)グリッドビットマップバッファ初期化
+  memset(coarse_map, 0, 4 * sizeof(BITLINE80) * FIELD_SIZE_Y / 2);
 
-  // カウンタ
-  uint32_t counter = 0;
-  uint32_t clear_freeze_counter = 0;
-  uint32_t deploy_freeze_counter = 0;
-  uint32_t mino_counter = 0;
-
-  // ゲームオーバー判定
+  // ゲームオーバー判定フラグ
   int16_t game_over = 0;
 
-  // 連鎖カウンタ
-  int16_t combo_count = 0;         // 現在の連鎖数（0 = 連鎖なし、1 = 2連鎖目...
-  int16_t combo_valid_counter = 0;   // 連鎖を受け付ける残りフレーム数（0で連鎖終了）
+  // カウンタ
+  uint32_t counter = 0;                   // 汎用
+  uint32_t clear_freeze_counter = 0;      // 左右連結イベント発生時のカウンタ
+  uint32_t deploy_freeze_counter = 0;     // 着地イベント発生時のカウンタ
+  uint32_t mino_counter = 0;              // 出現ミノ数カウント用
 
-  // スプライト色と位置
-  int16_t sp_mino = -1;
-  int16_t sp_rotation = -1;
-  int16_t sp_pos_x = -1;    // 基準位置
-  int16_t sp_pos_y = -1;    // 基準位置
+  // 連鎖カウンタ
+  int16_t combo_count = 0;                // 現在の連鎖数（0 = 連鎖なし、1 = 2連鎖目...
+  int16_t combo_valid_counter = 0;        // 連鎖を受け付ける残りフレーム数（0で連鎖終了）
+
+  // 左右連結した色保持用
+  int16_t fire_c = -1;
 
   // ボタン押しっぱなし判定用
   int16_t trigger_a = 0;
   int16_t trigger_b = 0;
 
-  // 最初の次のミノ
+  // 操作ミノ用スプライト種別と位置
+  int16_t sp_mino = -1;
+  int16_t sp_rotation = -1;
+  int16_t sp_pos_x = -1;
+  int16_t sp_pos_y = -1;
+
+  // NEXTミノ初期化
   int16_t sp_mino_next = rand() % 7;
   int16_t sp_rotation_next = rand() % 4;
-  int16_t sp_pos_x_next = 160 + 16;
-  int16_t sp_pos_y_next = 88 + 16;
   sp_color_next = rand() % 4;
-  locate_mino(sp_pos_x_next, sp_pos_y_next, sp_mino_next, sp_rotation_next, sp_x_next, sp_y_next);
+  locate_mino(SP_OFS_X_NEXT, SP_OFS_Y_NEXT, sp_mino_next, sp_rotation_next, sp_x_next, sp_y_next);
 
   // グローバル変数初期化
   page_render = 0;
@@ -480,39 +647,23 @@ game_start:
   block_event_delete = 0;
   block_event_new = 0;
 
-  // 探索用の「火が燃え広がっているマップ」
-  static BITLINE80 fire[FIELD_SIZE_Y/2];
-  int16_t fire_c = -1;    // 左右連結した色
-
   // 開始待ち
-  put_text(8,128,3,1,"PUSH SPACE KEY");
-  for (;;) {
-    if (_iocs_b_keysns() != 0) {
-      int16_t scan_code = _iocs_b_keyinp() >> 8;
-      if (scan_code == KEY_SCAN_CODE_SPACE) {
-        break;
-      } else if (scan_code == KEY_SCAN_CODE_ESC) {
-        goto exit;
-      }
-    }
-    if ((_iocs_joyget(0) & 0x20) == 0) break;
+  if (wait_game_start() != 0) {
+    goto exit;
   }
-  put_text(8,128,3,1,"              ");
 
   // VSYNC割り込み開始
-  int16_t vsync = 0;
   if (_iocs_vdispst((uint8_t*)refresh_screen, 0, 1) != 0) {
     printf("VSYNC割り込みが使用中です。\n");
     goto exit;
   }
   vsync = 1;
 
-  // タイマーAをリセットしておかないと、ハードリセット後にVSYNC割り込みがすぐに開始しない
-  _iocs_b_bpoke((uint8_t*)0xe88019,0x00);  // stop Timer-A  
-  _iocs_b_bpoke((uint8_t*)0xe8801f,0x01);  // set Timer-A counter        
-  _iocs_b_bpoke((uint8_t*)0xe88019,0x18);  // restart Timer-A    
+  // タイマーAリセット(これをしないとハードリセット直後のVSYNC割り込みが正常にスタートしない)
+  reset_timer_a();
 
-  for (;;) {
+  // ゲームメインループ
+  while (!game_over) {
 
     // ESCキーが押されたら終了
     if (_iocs_b_keysns() != 0) {
@@ -689,7 +840,7 @@ game_start:
             
             score += base_score * combo_bonus;
             sprintf(score_mes,"%8d",score);
-            put_text(144,48,3,1,score_mes);
+            put_text_8x8(144,48,3,1,score_mes);
 
             // ★物理が再開するここから「120フレーム（2秒）」、次の連鎖を受け付ける！
             // 砂が上からドサッと落ちてきて下に定着するまでの猶予時間になります。
@@ -784,15 +935,15 @@ game_start:
         sp_mino = sp_mino_next;
         sp_rotation = sp_rotation_next;
         sp_color = sp_color_next;
-        sp_pos_x = grid_x * NUM_SANDS_X + 16;
-        sp_pos_y = grid_y * NUM_SANDS_Y + 16;
+        sp_pos_x = SP_INIT_POS_X;
+        sp_pos_y = SP_INIT_POS_Y;
         locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
         mino_counter++;
 
         sp_mino_next = rand() % 7;
         sp_rotation_next = rand() % 4;
         sp_color_next = rand() % 4;
-        locate_mino(sp_pos_x_next, sp_pos_y_next, sp_mino_next, sp_rotation_next, sp_x_next, sp_y_next);
+        locate_mino(SP_OFS_X_NEXT, SP_OFS_Y_NEXT, sp_mino_next, sp_rotation_next, sp_x_next, sp_y_next);
 
         block_event_new = 1;
         block_event_next = 1;
@@ -852,7 +1003,7 @@ game_start:
           // スコアアップ
           score += 100;
           sprintf(score_mes,"%8d",score);
-          put_text(144,48,3,1,score_mes);
+          put_text_8x8(144,48,3,1,score_mes);
 
           block_event_delete = 1;
         }
@@ -989,25 +1140,35 @@ game_start:
               // マスが変わったので、元いたラインと、移動先のラインを再描画対象にする
               invalidates[page_calc][y] = 1;
               invalidates[page_calc][next_y_hi] = 1;
-
+/*
               // 色別グリッドバッファに書き込む (元のグリッドからは消さない) ---
               int16_t c       = (tmp.attr.color - 1) & 3; // 4色グループへのマスク
               int16_t next_cy = next_y_hi >> 1;     // 縦は2ドット単位なので「>> 1」(120行)
 
-              // 移動先のX座標を基準に、lo / mi / hi へ綺麗に振り分ける
-              if (next_x_hi < 32) {
-                // 0 〜 31 ドット目：loレジスタ
-                coarse_map[c][next_cy].lo |= (1 << next_x_hi);
-              } 
-              else if (next_x_hi < 64) {
-                // 32 〜 63 ドット目：miレジスタ（32を引いて 0〜31番目のビットにする）
-                coarse_map[c][next_cy].mi |= (1 << (next_x_hi - 32));
-              } 
-              else {
-                // 64 〜 79 ドット目：hiレジスタ（64を引いて 0〜15番目のビットにする）
-                coarse_map[c][next_cy].hi |= (1 << (next_x_hi - 64));
+              uint32_t bit_mask = 0;
+              int16_t bit_pos = 0;
+
+              // px に応じて操作するビットの位置を特定
+              if (next_x_hi < 32)      { bit_pos = next_x_hi;       }
+              else if (next_x_hi < 64) { bit_pos = next_x_hi - 32;  }
+              else                     { bit_pos = next_x_hi - 64;  }
+
+              bit_mask = (1 << bit_pos);
+
+              // 1. まずは自分の色の coarse_map にビットを立てる（通常通り）
+              if (next_x_hi < 32)        coarse_map[c][next_cy].lo |= bit_mask;
+              else if (next_x_hi < 64)   coarse_map[c][next_cy].mi |= bit_mask;
+              else                       coarse_map[c][next_cy].hi |= bit_mask;
+
+              // 2. 【追加】自分以外の残り3色から、このグリッドのビットを「上書き消去」する！
+              for (int16_t other_c = 0; other_c < 4; other_c++) {
+                  if (other_c == c) continue; // 自分はスキップ
+
+                  if (next_x_hi < 32)        coarse_map[other_c][next_cy].lo &= ~bit_mask;
+                  else if (next_x_hi < 64)   coarse_map[other_c][next_cy].mi &= ~bit_mask;
+                  else                       coarse_map[other_c][next_cy].hi &= ~bit_mask;
               }
-              
+              */
               // ★【前述のウェイクアップ処理を入れるならここ！】
               // 実際に別のマスへ移動が起きたので、周囲の砂を起こす
               if (y > 0) {
@@ -1053,6 +1214,35 @@ game_start:
               } else {
                 particles[y][x].attr.moment_x = 0;  // まだ起きて微振動のチャンスを残す
               }
+
+              // 色別グリッドバッファに書き込む (元のグリッドからは消さない) ---
+              int16_t c  = (particles[y][x].attr.color - 1) & 3; // 4色グループへのマスク
+              int16_t cy = y >> 1;     // 縦は2ドット単位なので「>> 1」(120行)
+
+              uint32_t bit_mask = 0;
+              int16_t bit_pos = 0;
+
+              // px に応じて操作するビットの位置を特定
+              if (x < 32)      { bit_pos = x;       }
+              else if (x < 64) { bit_pos = x - 32;  }
+              else             { bit_pos = x - 64;  }
+
+              bit_mask = (1 << bit_pos);
+
+              // 1. まずは自分の色の coarse_map にビットを立てる（通常通り）
+              if (x < 32)        coarse_map[c][cy].lo |= bit_mask;
+              else if (x < 64)   coarse_map[c][cy].mi |= bit_mask;
+              else               coarse_map[c][cy].hi |= bit_mask;
+
+              // 2. 【追加】自分以外の残り3色から、このグリッドのビットを「上書き消去」する！
+              for (int16_t other_c = 0; other_c < 4; other_c++) {
+                  if (other_c == c) continue; // 自分はスキップ
+
+                  if (x < 32)        coarse_map[other_c][cy].lo &= ~bit_mask;
+                  else if (x < 64)   coarse_map[other_c][cy].mi &= ~bit_mask;
+                  else               coarse_map[other_c][cy].hi &= ~bit_mask;
+              }
+
             }
 
           }
@@ -1226,57 +1416,63 @@ game_start:
     page_next = page_calc;         // 今回書き上げた面を「次回の表示待ち」にする
     page_calc = page_calc_next;    // 割り込みが「使い終わった面」を、次の計算面として回収する
 
-    if (game_over) break;
+  } // ゲームメインループここまで
 
-  }
 
+  // VSYNC割り込み利用停止
   if (vsync > 0) {
     _iocs_vdispst(0, 0, 0);
+    vsync = 0;
   }
 
-  put_text(28,128,3,1,"GAME OVER");
-  for (;;) {
-    if (_iocs_b_keysns() != 0) {
-      int16_t scan_code = _iocs_b_keyinp() >> 8;
-      if (scan_code == KEY_SCAN_CODE_SPACE) {
-        break;
-      } else if (scan_code == KEY_SCAN_CODE_ESC) {
-        goto exit;
-      }
+  // ゲームオーバー待機画面
+  if (game_over) {
+    if (wait_game_over() != 0) {
+      rc = 0;
+      goto exit;
     }
-    if ((_iocs_joyget(0) & 0x20) == 0) break;
   }
-  put_text(28,128,3,1,"         ");
 
-  if (score > hi_score) hi_score = score;
+  // ハイスコア書き換え
+  if (score > hi_score) {
+    hi_score = score;
+  }
 
+  // 一呼吸
   usleep(500);
 
   goto game_start;
 
-  rc = 0;
 
 exit:
 
+  // VSYNC割り込み利用停止
   if (vsync > 0) {
     _iocs_vdispst(0, 0, 0);
+    vsync = 0;
   }
 
+  // ユーザーモードに復帰
   if (usp > 0) {
     _iocs_b_super(usp);
+    usp = -1;
   }
 
+  // 画面モードをリセット
   _iocs_crtmod(16);
   _iocs_g_clr_on();
 
+  // ファンクションキー表示をリセット
   if (funckey_mode >= 0) {
     _dos_c_fnkmod(funckey_mode);
   }
 
+  // カーソル表示ON
   _dos_c_curon();
 
   // キーバッファフラッシュ
   _dos_kflushio(0xff);
 
+  // 終了
   return rc;
 }

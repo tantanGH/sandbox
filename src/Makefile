@@ -36,7 +36,7 @@ C_SRCS = main.c
 ASM_SRCS = 
 
 # *.h source files
-HEADER_SRCS = keyboard.h pattern.h sandbox.h
+HEADER_SRCS = keyboard.h crtc.h pattern.h sandbox.h
 
 # リンク対象のライブラリファイル
 LIBS =
