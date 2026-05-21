@@ -17,8 +17,8 @@
 #define SP_OFS_X (16 + 24)
 #define SP_OFS_Y (16)
 
-#define SP_OFS_X_NEXT (16 + 160)
-#define SP_OFS_Y_NEXT (16 + 80)
+#define SP_OFS_X_NEXT (16 + 168)
+#define SP_OFS_Y_NEXT (16 + 88)
 
 #define DEFAULT_HI_SCORE (76500)
 

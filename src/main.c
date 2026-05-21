@@ -175,7 +175,7 @@ static void __attribute__((interrupt)) refresh_screen() {
   }
 
   // グラフィック画面書き込み基準位置は右に少しオフセット
-  uint64_t* gp = (uint64_t*)(GVRAM + 0x30);
+  uint64_t* gp = (uint64_t*)(GVRAM + 24);
   uint64_t* fp = (uint64_t*)&screen_buffers[page_render];
   for (uint16_t y = 0; y < FIELD_SIZE_Y; y++) {
     // 無効化判定フラグの立ったラインのみ転送する (64bit(4ドット) * 20 = 横80ドット)
@@ -306,7 +306,7 @@ static void put_particles(int16_t pos_x, int16_t pos_y, int16_t color) {
   for (int16_t sy = start_y; sy < end_y; sy++) {
 
     int16_t py = pos_y + sy;
-//    int16_t cy = py >> 1; // 縦2ドット単位のインデックス
+    int16_t cy = py >> 1; // 縦2ドット単位のインデックス
 
     for (int16_t sx = start_x; sx < end_x; sx++) {
 
@@ -326,15 +326,13 @@ static void put_particles(int16_t pos_x, int16_t pos_y, int16_t color) {
       invalidates[page_calc][py] = 1;
 
       // 色グループ（c_group）のビットマップに書き込む
-//      if (px < 32) {
-//        coarse_map[c_group][cy].lo |= (1 << px);
-//      } else if (px < 64) {
-//        coarse_map[c_group][cy].mi |= (1 << (px - 32));
-//      } else {
-//        coarse_map[c_group][cy].hi |= (1 << (px - 64));
-//      }
-
-      // 左右開通判定が甘くなりすぎないように、いったんここではビットマップグリッドへの書き込みはやめておく
+      if (px < 32) {
+        coarse_map[c_group][cy].lo |= (1 << px);
+      } else if (px < 64) {
+        coarse_map[c_group][cy].mi |= (1 << (px - 32));
+      } else {
+        coarse_map[c_group][cy].hi |= (1 << (px - 64));
+      }
 
     }
   }
@@ -584,6 +582,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   uint32_t hi_score = DEFAULT_HI_SCORE;
 
 
+  // ゲームループ
 game_start:
 
   // ハイスコア表示(値の初期化はしない)
@@ -676,7 +675,7 @@ game_start:
     // このフレームで物理を動かすかどうか
     int16_t run_physics = 1;
 
-    // --- 連鎖受付タイマーのカウントダウン ---
+    // 連鎖受付タイマーのカウントダウン
     if (combo_valid_counter > 0) {
       combo_valid_counter--;
       if (combo_valid_counter == 0) {
@@ -689,9 +688,7 @@ game_start:
 
       clear_freeze_counter--;
 
-      // ========================================================
-      // 【追加】カウントダウン途中（タイマー > 0）の明滅演出
-      // ========================================================
+      // カウントダウン途中（タイマー > 0）の明滅演出
       if (clear_freeze_counter > 0 && fire_c >= 0 && (clear_freeze_counter % 4) == 0) {
 
         // タイマーのビット3を使って、4フレームごとに「点滅のON/OFF」を切り替える
@@ -699,6 +696,7 @@ game_start:
 
         // 開通した「火のルート」だけを走査
         for (int16_t fy = FIELD_SIZE_Y/2 - 1; fy >= 0; fy--) {
+
           BITLINE80 f = fire[fy];
           if (f.lo == 0 && f.mi == 0 && f.hi == 0) continue;
 
@@ -739,11 +737,11 @@ game_start:
         } // fy
       }
 
+      // カウントダウン終了時には実際に消す
       if (clear_freeze_counter == 0 && fire_c >= 0) {
         
         int32_t deleted_pixels = 0; // ★ 今回一度に消したドット数のカウンタ
 
-        // 【修正1】消去処理を完全に全行回しきるため、ループ構造を整理
         for (int16_t fy = FIELD_SIZE_Y/2 - 1; fy >= 0; fy--) {
 
           BITLINE80 f = fire[fy];
@@ -757,6 +755,7 @@ game_start:
 
           // 横80ドットを走査
           for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
+
             int is_fired = 0;
 
             if (px < 32) {
@@ -769,12 +768,13 @@ game_start:
 
             if (is_fired) {
               
-              // --- ① 下段（py0）の個別消去 ＆ ウェイクアップ ---
+              // 下段（py0）の個別消去 ＆ ウェイクアップ
               if (particles[py0][px].raw != 0) {
+
                 int16_t current_p_color0 = (particles[py0][px].attr.color - 1) & 3;
                 
                 if (current_p_color0 == fire_c) {
-                  // ★ py0が消えるので、その「真上（py0 - 1）」を叩き起こす
+                  // py0が消えるので、その「真上（py0 - 1）」を叩き起こす
                   int16_t upper_y0 = py0 - 1;
                   if (upper_y0 >= 0 && particles[upper_y0][px].attr.moment_x == -4) {
                     particles[upper_y0][px].attr.moment_x = 0; 
@@ -789,14 +789,15 @@ game_start:
                 }
               }
 
-              // --- ② 上段（py1）の個別消去 ＆ ウェイクアップ ---
+              // 上段（py1）の個別消去 ＆ ウェイクアップ ---
               if (py1 < FIELD_SIZE_Y && particles[py1][px].raw != 0) {
+                
                 int16_t current_p_color1 = (particles[py1][px].attr.color - 1) & 3;
                 
                 if (current_p_color1 == fire_c) {
-                  // ★ py1が消えるので、その「真上（つまりpy0）」を叩き起こす！
-                  // ※ただし、py0が「このフレームで一緒に消える対象」なら起こす必要はないですが、
-                  // もし別色で生き残る砂なら、ここで起こしてあげることで足場を失って即座に下に落ちます。
+                  // ★ py1が消えるので、その「真上（つまりpy0）」を叩き起こす
+                  // ※ただし、py0が「このフレームで一緒に消える対象」なら起こす必要はないが、
+                  // もし別色で生き残る砂なら、ここで起こす必要あり
                   if (particles[py0][px].attr.moment_x == -4) {
                     particles[py0][px].attr.moment_x = 0; 
                     invalidates[page_calc][py0] = 1;
@@ -814,97 +815,141 @@ game_start:
           }
         }
 
-        // 【修正】すべての色（4色分）の coarse_map を一旦完全に真っ黒（0）にする！
+        // すべての色（4色分）の coarse_map を一旦完全に初期化
         memset(coarse_map, 0, sizeof(coarse_map));
 
-        // その代わり、今画面に生き残っているすべての粒子データ（particles）を走査して、
-        // 今の正しい座標で coarse_map を一から完全に再構築（リビルド）する！
+        // 今画面に生き残っているすべての粒子データ（particles）を走査して、
+        // 今の正しい座標で coarse_map を一から完全に再構築
         for (int16_t py = 0; py < FIELD_SIZE_Y; py++) {
           int16_t cy = py >> 1; // 縦2ドット単位
           for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
             if (particles[py][px].raw != 0) {
-              int16_t col_group = (particles[py][px].attr.color - 1) & 3;
-              if (px < 32)        coarse_map[col_group][cy].lo |= (1 << px);
-              else if (px < 64)   coarse_map[col_group][cy].mi |= (1 << (px - 32));
-              else                coarse_map[col_group][cy].hi |= (1 << (px - 64));
+              int16_t mx = particles[py][px].attr.moment_x;
+              int16_t my = particles[py][px].attr.moment_y;
+              // スリープ・静止しているものだけを対象にする
+              if (mx == -4 || (mx == 0 && my == 0)) {
+                int16_t col_group = (particles[py][px].attr.color - 1) & 3;
+                if (px < 32)        coarse_map[col_group][cy].lo |= (1 << px);
+                else if (px < 64)   coarse_map[col_group][cy].mi |= (1 << (px - 32));
+                else                coarse_map[col_group][cy].hi |= (1 << (px - 64));
+
+              }
             }
           }
         }
 
         // スコアアップ
         if (deleted_pixels > 0) {
-            int32_t base_score = deleted_pixels * 10;
-            
-            // 連鎖ボーナス倍率（例：単発 = ×1、2連鎖 = ×2、3連鎖 = ×4 と指数関数的に上げる）
-            int32_t combo_bonus = 1 << combo_count; 
-            
-            score += base_score * combo_bonus;
-            sprintf(score_mes,"%8d",score);
-            put_text_8x8(144,48,3,1,score_mes);
 
-            // ★物理が再開するここから「120フレーム（2秒）」、次の連鎖を受け付ける！
-            // 砂が上からドサッと落ちてきて下に定着するまでの猶予時間になります。
-            // 2連鎖、3連鎖と続くほど、受付時間を少し長め（150など）にしてあげると親切です。
-            combo_valid_counter = 120 + (combo_count * 20); 
+          int32_t base_score = deleted_pixels * 10;
+            
+          // 連鎖ボーナス倍率（例：単発 = ×1、2連鎖 = ×2、3連鎖 = ×4 と指数関数的に上げる）
+          int32_t combo_bonus = 1 << combo_count; 
+            
+          score += base_score * combo_bonus;
+          sprintf(score_mes,"%8d",score);
+          put_text_8x8(144,48,3,1,score_mes);
+
+          // 物理が再開するここから「120フレーム（2秒）」、次の連鎖を受け付ける
+          // 2連鎖、3連鎖と続くほど、受付時間を少し長めにする
+          combo_valid_counter = 120 + (combo_count * 20); 
+
         }
 
+        // 開通色のリセット
         fire_c = -1;
 
       }
 
+      // 開通イベントフリーズカウンターが回ってる間は物理演算しない
       run_physics = 0;
 
     }
 
+    // メインループ内物理演算
     if (run_physics) {
 
-      // ブロック操作
+      // 着地フリーズイベントが発生しておらず、ミノが存在している場合はパッド操作を受け付ける
       if (deploy_freeze_counter == 0 && sp_mino >= 0) {
 
+        // IOCSコールではなくポート直読み
         //uint32_t j = _iocs_joyget(0);
         uint8_t j = *((volatile uint8_t*)(0x0e9a001));
-        if ((j & 4) == 0 && sp_x[0] > 16+24 && sp_x[1] > 16+24 && sp_x[2] > 16+24 && sp_x[3] > 16+24) {
-          sp_pos_x -= 2;
-          sp_x[0] -= 2;
-          sp_x[1] -= 2;
-          sp_x[2] -= 2; 
-          sp_x[3] -= 2;               
+
+        // 左が押された？
+        if ((j & 4) == 0) {
+          // まだ移動できる？
+          if (sp_x[0] > SP_OFS_X && 
+              sp_x[1] > SP_OFS_X && 
+              sp_x[2] > SP_OFS_X && 
+              sp_x[3] > SP_OFS_X) {
+                sp_pos_x -= 2;
+                sp_x[0] -= 2;
+                sp_x[1] -= 2;
+                sp_x[2] -= 2; 
+                sp_x[3] -= 2;     
+          }          
         }
-        if ((j & 8) == 0 && sp_x[0] < 16+24+80-8 && sp_x[1] < 16+24+80-8 && sp_x[2] < 16+24+80-8 && sp_x[3] < 16+24+80-8) {
-          sp_pos_x += 2;
-          sp_x[0] += 2;
-          sp_x[1] += 2;
-          sp_x[2] += 2;
-          sp_x[3] += 2;
+
+        // 右が押された？
+        if ((j & 8) == 0) {
+          // まだ移動できる？
+          if ((sp_x[0] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X) && 
+              (sp_x[1] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X) &&
+              (sp_x[2] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X) && 
+              (sp_x[3] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X)) {
+                sp_pos_x += 2;
+                sp_x[0] += 2;
+                sp_x[1] += 2;
+                sp_x[2] += 2; 
+                sp_x[3] += 2;
+          }
         }
-        if ((j & 2) == 0 && sp_y[0] < 16+240-12 && sp_y[1] < 16+240-12 && sp_y[2] < 16+240-12 && sp_y[3] < 16+240-12) {
-          sp_pos_y += 3;
-          sp_y[0] += 3;
-          sp_y[1] += 3;
-          sp_y[2] += 3;
-          sp_y[3] += 3;
+
+        // 下が押された？
+        if ((j & 2) == 0) {
+          // まだ移動できる？
+          if ((sp_y[0] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y) &&
+              (sp_y[1] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y) &&
+              (sp_y[2] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y) &&
+              (sp_y[3] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y)) {
+                sp_pos_y += 3;
+                sp_y[0] += 3;
+                sp_y[1] += 3;
+                sp_y[2] += 3;
+                sp_y[3] += 3;
+          }
         }
+
+        // ボタンBが押された?
         if ((j & 0x40) == 0 && trigger_b == 0) {
+          // 回転できそうなら回転する
           if (locate_mino_check(sp_pos_x, sp_pos_y, sp_mino, (sp_rotation + 1) % 4)) {
             sp_rotation = (sp_rotation + 1) % 4;
             locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
-            trigger_b = 1;
+            trigger_b = 1; // 押しっぱなしで回転しつづけないように
           }
         }
         if ((j & 0x40)) {
+          // ボタンBが離された
           trigger_b = 0;
         }
+
+        // ボタンAが押された？
         if ((j & 0x20) == 0 && trigger_a == 0) {
+          // 回転できそうなら回転する
           if (locate_mino_check(sp_pos_x, sp_pos_y, sp_mino, (sp_rotation + 3) % 4)) {
             sp_rotation = (sp_rotation + 3) % 4;
             locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
-            trigger_a = 1;    
+            trigger_a = 1; // 押しっぱなしで回転しつづけないように
           }
         }
         if ((j & 0x20)) {
+          // ボタンBが離された
           trigger_a = 0;
         }
 
+        // ミノの自然落下
         if (mino_counter < 10) {
           if ((counter % 2) == 0) {
             sp_pos_y++;
@@ -929,9 +974,10 @@ game_start:
 
       }
 
-      // 新規ブロック
+      // 新規ミノの出現
       if ((counter % 200) == 0 && sp_mino < 0) {
 
+        // 新規ミノの種別はNEXTミノの属性をコピー
         sp_mino = sp_mino_next;
         sp_rotation = sp_rotation_next;
         sp_color = sp_color_next;
@@ -939,17 +985,18 @@ game_start:
         sp_pos_y = SP_INIT_POS_Y;
         locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
         mino_counter++;
+        block_event_new = 1;    // VSYNC割り込みハンドラ内で描画してもらう
 
+        // NEXTミノはランダムに定める
         sp_mino_next = rand() % 7;
         sp_rotation_next = rand() % 4;
         sp_color_next = rand() % 4;
         locate_mino(SP_OFS_X_NEXT, SP_OFS_Y_NEXT, sp_mino_next, sp_rotation_next, sp_x_next, sp_y_next);
+        block_event_next = 1;   // VSYNC割り込みハンドラ内で描画してもらう
 
-        block_event_new = 1;
-        block_event_next = 1;
       }      
 
-      // ブロックの着地判定
+      // ミノの着地判定
       if (sp_mino >= 0 && (
           (sp_y[0] - 16 + 12 >= 240 || sp_y[1] - 16 + 12 >= 240 || sp_y[2] - 16 + 12 >= 240 || sp_y[3] - 16 + 12 >= 240) ||
 
@@ -973,10 +1020,12 @@ game_start:
           particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 4].attr.color > 0 || 
           particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 6].attr.color > 0))) {
 
-          if (sp_pos_y < 24) {
-            // ゲームオーバー
-            game_over = 1;
-          } else {
+        if (sp_pos_y < 24) {
+
+          // ゲームオーバー
+          game_over = 1;    // 最後の画面更新が必要なのでフラグを立てるだけ
+
+        } else {
 
           //_iocs_adpcmout(pcm_noise1,4*256+3,sizeof(pcm_noise1));
 
@@ -990,7 +1039,7 @@ game_start:
             if (pattern & (0x8000 >> i)) {
               int16_t block_x = i % 4;
               int16_t block_y = i / 4;                
-              put_particles(sp_pos_x - 16 - 24 + block_x * NUM_SANDS_X, sp_pos_y - 16 + block_y * NUM_SANDS_Y, sp_color);
+              put_particles(sp_pos_x - SP_OFS_X + block_x * NUM_SANDS_X, sp_pos_y - SP_OFS_Y + block_y * NUM_SANDS_Y, sp_color);
             }
           }
 
@@ -1249,10 +1298,11 @@ game_start:
         }
       }
 
-      // 左右が繋がったかチェック (4フレームに1回)
-      if ((counter % 3) == 0) {
+      // 左右が繋がったかチェック (2フレームに1回、1色ずつ)
+      if ((counter % 2) == 0 && fire_c < 0) {
 
-        for (int16_t c = 0; c < 4; c++) {   // 4色
+        int16_t c = (counter >> 1) & 3;
+//        for (int16_t c = 0; c < 4; c++) {   // 4色
 
           // 【超高速事前チェック】左端の縦一列に、この色の砂が1粒でもあるか？
           //uint32_t left_wall_check = 0;
@@ -1372,18 +1422,18 @@ game_start:
           }
 
           // 【修正3】この色で消去が発生したら、他の色の処理をせず今回の判定フレームを完了する
-          if (connected) break; 
+          //if (connected) break; 
         }
-      }
+      
     
     } // if (run_physics) { 
 
-    // 追い越しガード
+    // 物理計算の追い越しガード
     while (page_calc == page_render) {
         // 次のVSYNC割り込みが page_next を受け取ってくれるまで待機
     }
 
-    // ブロック着地後の振動
+    // ブロック着地後の振動イベント (ここは垂直帰線期間内と想定)
     if (deploy_freeze_counter > 0) {
 
       switch (deploy_freeze_counter) {
@@ -1417,7 +1467,6 @@ game_start:
     page_calc = page_calc_next;    // 割り込みが「使い終わった面」を、次の計算面として回収する
 
   } // ゲームメインループここまで
-
 
   // VSYNC割り込み利用停止
   if (vsync > 0) {
