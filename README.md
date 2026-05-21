@@ -13,6 +13,8 @@ SANDBOX.X - A Falling Sand Physics Puzzler for X680x0
  - SANDBOX.X ... すべてのMPUモードに対応(PhantomXの場合はこちらを推奨)
  - SAND060.X ... 68060専用(060turboの場合はこちらを推奨)
 
+ <img src='sandbox.jpg' width='800px'/>
+
 ---
 
 ## 動作環境 (X68030実機 + 060turbo)
