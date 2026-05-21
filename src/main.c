@@ -12,6 +12,15 @@
 #include "keyboard.h"
 #include "crtc.h"
 
+// 操作対象となるミノ
+static MINO mino;
+
+// NEXTミノ
+static MINO mino_next;
+
+// ミノ出現数カウンタ
+static uint32_t mino_counter;
+
 // 物理演算用バッファ
 static PARTICLE particles[FIELD_SIZE_Y][FIELD_SIZE_X]; 
 
@@ -27,17 +36,12 @@ static BITLINE80 coarse_map[4][FIELD_SIZE_Y/2];
 // 左右開通探索用 火が燃え広がってるバッファ
 static BITLINE80 fire[FIELD_SIZE_Y/2];
 
-// VSYNC割り込みが「いま現在描画中」のページ
-volatile static int16_t page_render = 0;
+// 左右開通確定用バッファ
+static BITLINE80 valid_fire[FIELD_SIZE_Y / 2];
 
-// メインループが「いま現在書き込み中」のページ
-volatile static int16_t page_calc = 1;
-
-// VSYNC割り込みが「次に描画する」ページ
-volatile static int16_t page_next = 2;
-
-// スコア文字列表示用テキストバッファ
-static uint8_t score_mes[ 256 ];
+// トリガ押しっぱなしチェック用フラグ
+static int16_t trigger_a;
+static int16_t trigger_b;
 
 // 8x8 normal font data
 static struct iocs_fntbuf font_data_8x8[ 256 ];
@@ -48,7 +52,7 @@ static struct iocs_fntbuf font_data_8x8_bold[ 256 ];
 // クイック乱数用シード
 static uint32_t quickrand_seed = 2463534242;
 
-// Xorshift32をインライン関数で定義
+// 高速乱数インライン関数
 static inline uint32_t quickrand(void) {
     quickrand_seed ^= (quickrand_seed << 13);
     quickrand_seed ^= (quickrand_seed >> 17);
@@ -56,26 +60,26 @@ static inline uint32_t quickrand(void) {
     return quickrand_seed;
 }
 
+// VSYNC割り込みが「いま現在描画中」のページ
+static volatile int16_t page_render = 0;
+
+// メインループが「いま現在書き込み中」のページ
+static volatile int16_t page_calc = 1;
+
+// VSYNC割り込みが「次に描画する」ページ
+static volatile int16_t page_next = 2;
+
 // VSYNC割り込みハンドラに伝えるイベントフラグ
 static volatile int16_t block_event_new = 0;
 static volatile int16_t block_event_delete = 0;
 static volatile int16_t block_event_next = 0;
-
-// ミノスプライトの現在位置とカラー
-static int16_t sp_x[4];          // 各ブロックの位置
-static int16_t sp_y[4];          // 各ブロックの位置
-static volatile int16_t sp_color = -1;
-
-// ミノスプライト(NEXT)の現在位置とカラー
-static int16_t sp_x_next[4];          // 各ブロックの位置(NEXT)
-static int16_t sp_y_next[4];          // 各ブロックの位置(NEXT)
-static int16_t sp_color_next = -1;
+static volatile int16_t deploy_freeze_counter = 0;
 
 //
-//  タイマーAリセット
+//  タイマーA強制リセット 
+//  これをしておかないと、ハードリセット後にVSYNC割り込みがすぐに開始しない
 //
 static void reset_timer_a() {
-  // タイマーAをリセットしておかないと、ハードリセット後にVSYNC割り込みがすぐに開始しない
   _iocs_b_bpoke((uint8_t*)0xe88019,0x00);  // stop Timer-A  
   _iocs_b_bpoke((uint8_t*)0xe8801f,0x01);  // set Timer-A counter        
   _iocs_b_bpoke((uint8_t*)0xe88019,0x18);  // restart Timer-A    
@@ -90,24 +94,24 @@ static void __attribute__((interrupt)) refresh_screen() {
   if (block_event_next) {
 
     // 次のミノを表示 (スプライト番号4~7)
-    SP_SCRL[ 16 ] = sp_x_next[0];
-    SP_SCRL[ 17 ] = sp_y_next[0];
-    SP_SCRL[ 18 ] = 0x100 + sp_color_next;
+    SP_SCRL[ 16 ] = mino_next.block_pos_x[0];
+    SP_SCRL[ 17 ] = mino_next.block_pos_y[0];
+    SP_SCRL[ 18 ] = 0x100 + mino_next.color;
     SP_SCRL[ 19 ] = 3;
 
-    SP_SCRL[ 20 ] = sp_x_next[1];
-    SP_SCRL[ 21 ] = sp_y_next[1];
-    SP_SCRL[ 22 ] = 0x100 + sp_color_next;
+    SP_SCRL[ 20 ] = mino_next.block_pos_x[1];
+    SP_SCRL[ 21 ] = mino_next.block_pos_y[1];
+    SP_SCRL[ 22 ] = 0x100 + mino_next.color;
     SP_SCRL[ 23 ] = 3;
 
-    SP_SCRL[ 24 ] = sp_x_next[2];
-    SP_SCRL[ 25 ] = sp_y_next[2];
-    SP_SCRL[ 26 ] = 0x100 + sp_color_next;
+    SP_SCRL[ 24 ] = mino_next.block_pos_x[2];
+    SP_SCRL[ 25 ] = mino_next.block_pos_y[2];
+    SP_SCRL[ 26 ] = 0x100 + mino_next.color;
     SP_SCRL[ 27 ] = 3;
 
-    SP_SCRL[ 28 ] = sp_x_next[3];
-    SP_SCRL[ 29 ] = sp_y_next[3];
-    SP_SCRL[ 30 ] = 0x100 + sp_color_next;
+    SP_SCRL[ 28 ] = mino_next.block_pos_x[3];
+    SP_SCRL[ 29 ] = mino_next.block_pos_y[3];
+    SP_SCRL[ 30 ] = 0x100 + mino_next.color;
     SP_SCRL[ 31 ] = 3;
 
     block_event_next = 0;
@@ -129,42 +133,42 @@ static void __attribute__((interrupt)) refresh_screen() {
     // 新しい位置にミノを表示する必要があるか？
 
     // 新規作成 (スプライト番号 0~3)
-    SP_SCRL[  0 ] = sp_x[0];
-    SP_SCRL[  1 ] = sp_y[0];
-    SP_SCRL[  2 ] = 0x100 + sp_color;
+    SP_SCRL[  0 ] = mino.block_pos_x[0];
+    SP_SCRL[  1 ] = mino.block_pos_y[0];
+    SP_SCRL[  2 ] = 0x100 + mino.color;
     SP_SCRL[  3 ] = 3;
 
-    SP_SCRL[  4 ] = sp_x[1];
-    SP_SCRL[  5 ] = sp_y[1];
-    SP_SCRL[  6 ] = 0x100 + sp_color;
+    SP_SCRL[  4 ] = mino.block_pos_x[1];
+    SP_SCRL[  5 ] = mino.block_pos_y[1];
+    SP_SCRL[  6 ] = 0x100 + mino.color;
     SP_SCRL[  7 ] = 3;
 
-    SP_SCRL[  8 ] = sp_x[2];
-    SP_SCRL[  9 ] = sp_y[2];
-    SP_SCRL[ 10 ] = 0x100 + sp_color;
+    SP_SCRL[  8 ] = mino.block_pos_x[2];
+    SP_SCRL[  9 ] = mino.block_pos_y[2];
+    SP_SCRL[ 10 ] = 0x100 + mino.color;
     SP_SCRL[ 11 ] = 3;
 
-    SP_SCRL[ 12 ] = sp_x[3];
-    SP_SCRL[ 13 ] = sp_y[3];
-    SP_SCRL[ 14 ] = 0x100 + sp_color;
+    SP_SCRL[ 12 ] = mino.block_pos_x[3];
+    SP_SCRL[ 13 ] = mino.block_pos_y[3];
+    SP_SCRL[ 14 ] = 0x100 + mino.color;
     SP_SCRL[ 15 ] = 3;
 
     block_event_new = 0;
 
-  } else if (sp_color >= 0) {
+  } else if (mino.color >= 0) {
 
     // 消去でも新規表示でもないけど、存在しているならば移動のみ
-    SP_SCRL[  0 ] = sp_x[0];
-    SP_SCRL[  1 ] = sp_y[0];
+    SP_SCRL[  0 ] = mino.block_pos_x[0];
+    SP_SCRL[  1 ] = mino.block_pos_y[0];
 
-    SP_SCRL[  4 ] = sp_x[1];
-    SP_SCRL[  5 ] = sp_y[1];
+    SP_SCRL[  4 ] = mino.block_pos_x[1];
+    SP_SCRL[  5 ] = mino.block_pos_y[1];
 
-    SP_SCRL[  8 ] = sp_x[2];
-    SP_SCRL[  9 ] = sp_y[2];
+    SP_SCRL[  8 ] = mino.block_pos_x[2];
+    SP_SCRL[  9 ] = mino.block_pos_y[2];
 
-    SP_SCRL[ 12 ] = sp_x[3];
-    SP_SCRL[ 13 ] = sp_y[3];
+    SP_SCRL[ 12 ] = mino.block_pos_x[3];
+    SP_SCRL[ 13 ] = mino.block_pos_y[3];
 
   }
 
@@ -216,14 +220,27 @@ static void __attribute__((interrupt)) refresh_screen() {
     }
   }
 
+  // ブロック着地後の振動イベント
+  if (deploy_freeze_counter > 0) {
+
+    switch (deploy_freeze_counter) {
+      case  7: GR0_SCRL[1] = 510; BG0_SCRL[1] = 510; break;
+      case  5: GR0_SCRL[1] = 509; BG0_SCRL[1] = 509; break;
+      case  3: GR0_SCRL[1] = 510; BG0_SCRL[1] = 510; break;
+      case  1: GR0_SCRL[1] =   0; BG0_SCRL[1] =   0; break;
+    }
+
+    deploy_freeze_counter--;
+  }
+
 }
 
 //
-//  ミノを置けるかのチェック (0:置けない 1:置ける)
+//  ミノ：回転できるかのチェック (0:できない 1:できる)
 //
-static int16_t locate_mino_check(int16_t pos_x, int16_t pos_y, int16_t mino, int16_t rotation) {
+static int16_t mino_check_rotation(MINO* m, int16_t new_rotation) {
 
-  uint16_t pattern = MINO_TABLE[mino][rotation];
+  uint16_t pattern = MINO_PATTERNS[m->type][new_rotation];
   int16_t sp_index = 0;
   int16_t x[4];
   int16_t y[4];
@@ -237,8 +254,8 @@ static int16_t locate_mino_check(int16_t pos_x, int16_t pos_y, int16_t mino, int
       int block_y = i / 4;
             
       // 画面上の実際のスプライト座標を設定
-      x[sp_index] = pos_x + block_x * NUM_SANDS_X;
-      y[sp_index] = pos_y + block_y * NUM_SANDS_Y;
+      x[sp_index] = m->pos_x + block_x * NUM_SANDS_X;
+      y[sp_index] = m->pos_y + block_y * NUM_SANDS_Y;
       sp_index++;
     }
   }
@@ -263,11 +280,11 @@ static int16_t locate_mino_check(int16_t pos_x, int16_t pos_y, int16_t mino, int
 }
 
 //
-//  ミノを設置する (座標の設定のみ、実際の表示はVSYNC割り込みハンドラー内で)
+//  ミノ：構成するブロックの位置を設定する (座標の設定のみ、実際の表示はVSYNC割り込みハンドラ内で)
 //
-static void locate_mino(int16_t pos_x, int16_t pos_y, int16_t mino, int16_t rotation, int16_t sp_x[], int16_t sp_y[]) {
+static void mino_locate_blocks(MINO* m) {
 
-  uint16_t pattern = MINO_TABLE[mino][rotation];
+  uint16_t pattern = MINO_PATTERNS[m->type][m->rotation];
   int16_t sp_index = 0;
     
   // 4x4の格子をスキャン
@@ -279,19 +296,170 @@ static void locate_mino(int16_t pos_x, int16_t pos_y, int16_t mino, int16_t rota
       int block_y = i / 4;
             
       // 画面上の実際のスプライト座標を設定
-      sp_x[sp_index] = pos_x + block_x * NUM_SANDS_X;
-      sp_y[sp_index] = pos_y + block_y * NUM_SANDS_Y;
+      m->block_pos_x[sp_index] = m->pos_x + block_x * NUM_SANDS_X;
+      m->block_pos_y[sp_index] = m->pos_y + block_y * NUM_SANDS_Y;
       sp_index++;
     }
   }
 
-  // 実際の表示はVSYNC割り込みハンドラーにまかせる
+  // 実際の表示はVSYNC割り込みハンドラにまかせる
+}
+
+//
+//  ミノ：移動
+//
+static void mino_move(MINO* m, uint32_t counter) {
+
+  // IOCSコールではなくポート直読み
+  //uint32_t j = _iocs_joyget(0);
+  uint8_t j = *((volatile uint8_t*)(0x0e9a001));
+
+  // 左が押された？
+  if ((j & 4) == 0) {
+    // まだ移動できる？
+    if (m->block_pos_x[0] > SP_OFS_X && 
+        m->block_pos_x[1] > SP_OFS_X && 
+        m->block_pos_x[2] > SP_OFS_X && 
+        m->block_pos_x[3] > SP_OFS_X) {
+          m->pos_x -= 2;
+          m->block_pos_x[0] -= 2;
+          m->block_pos_x[1] -= 2;
+          m->block_pos_x[2] -= 2; 
+          m->block_pos_x[3] -= 2;     
+    }          
+  }
+
+  // 右が押された？
+  if ((j & 8) == 0) {
+    // まだ移動できる？
+    if ((m->block_pos_x[0] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X) && 
+        (m->block_pos_x[1] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X) &&
+        (m->block_pos_x[2] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X) && 
+        (m->block_pos_x[3] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X)) {
+          m->pos_x += 2;
+          m->block_pos_x[0] += 2;
+          m->block_pos_x[1] += 2;
+          m->block_pos_x[2] += 2; 
+          m->block_pos_x[3] += 2;
+    }
+  }
+
+  // 下が押された？
+  if ((j & 2) == 0) {
+    // まだ移動できる？
+    if ((m->block_pos_y[0] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y) &&
+        (m->block_pos_y[1] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y) &&
+        (m->block_pos_y[2] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y) &&
+        (m->block_pos_y[3] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y)) {
+          m->pos_y += 3;
+          m->block_pos_y[0] += 3;
+          m->block_pos_y[1] += 3;
+          m->block_pos_y[2] += 3;
+          m->block_pos_y[3] += 3;
+    }
+  }
+
+  // ボタンBが押された?
+  if ((j & 0x40) == 0 && trigger_b == 0) {
+    // 回転できそうなら回転する
+    if (mino_check_rotation(m, (m->rotation + 1) % 4)) {
+      m->rotation = (m->rotation + 1) % 4;
+      mino_locate_blocks(m);
+      trigger_b = 1; // 押しっぱなしで回転しつづけないように
+    }
+  }
+  if ((j & 0x40)) {
+    // ボタンBが離された
+    trigger_b = 0;
+  }
+
+  // ボタンAが押された？
+  if ((j & 0x20) == 0 && trigger_a == 0) {
+    // 回転できそうなら回転する
+    if (mino_check_rotation(m, (m->rotation + 3) % 4)) {
+      m->rotation = (m->rotation + 3) % 4;
+      mino_locate_blocks(m);
+      trigger_a = 1; // 押しっぱなしで回転しつづけないように
+    }
+  }
+  if ((j & 0x20)) {
+    // ボタンBが離された
+    trigger_a = 0;
+  }
+
+  // ミノの自然落下
+  if (mino_counter < 10) {
+    if ((counter % 2) == 0) {
+      m->pos_y++;
+      m->block_pos_y[0]++;
+      m->block_pos_y[1]++;
+      m->block_pos_y[2]++;
+      m->block_pos_y[3]++;
+    }
+  } else if (mino_counter < 20) {
+    m->pos_y++;
+    m->block_pos_y[0]++;
+    m->block_pos_y[1]++;
+    m->block_pos_y[2]++;
+    m->block_pos_y[3]++;          
+  } else if (mino_counter < 40) {
+    m->pos_y += 2;
+    m->block_pos_y[0] += 2;
+    m->block_pos_y[1] += 2;
+    m->block_pos_y[2] += 2;
+    m->block_pos_y[3] += 2;         
+  } else {
+    m->pos_y += 3;
+    m->block_pos_y[0] += 3;
+    m->block_pos_y[1] += 3;
+    m->block_pos_y[2] += 3;
+    m->block_pos_y[3] += 3;        
+  }
+
+}
+
+//
+//  ミノ：砂・床の衝突判定 (0:してない 1:した)
+//
+static int16_t mino_check_collision(MINO* m) {
+
+  // 床との衝突判定
+  if (m->block_pos_y[0] - SP_OFS_Y + NUM_SANDS_Y >= FIELD_SIZE_Y ||
+      m->block_pos_y[1] - SP_OFS_Y + NUM_SANDS_Y >= FIELD_SIZE_Y ||
+      m->block_pos_y[2] - SP_OFS_Y + NUM_SANDS_Y >= FIELD_SIZE_Y ||
+      m->block_pos_y[3] - SP_OFS_Y + NUM_SANDS_Y >= FIELD_SIZE_Y) return 1;
+
+  // ブロック0の下面と砂の衝突判定
+  if (particles[ m->block_pos_y[0] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[0] - SP_OFS_X     ].attr.color > 0 ||
+      particles[ m->block_pos_y[0] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[0] - SP_OFS_X + 2 ].attr.color > 0 || 
+      particles[ m->block_pos_y[0] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[0] - SP_OFS_X + 4 ].attr.color > 0 || 
+      particles[ m->block_pos_y[0] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[0] - SP_OFS_X + 6 ].attr.color > 0) return 1;
+
+  // ブロック1の下面と砂の衝突判定
+  if (particles[ m->block_pos_y[1] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[1] - SP_OFS_X     ].attr.color > 0 ||
+      particles[ m->block_pos_y[1] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[1] - SP_OFS_X + 2 ].attr.color > 0 || 
+      particles[ m->block_pos_y[1] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[1] - SP_OFS_X + 4 ].attr.color > 0 || 
+      particles[ m->block_pos_y[1] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[1] - SP_OFS_X + 6 ].attr.color > 0) return 1;
+
+  // ブロック2の下面と砂の衝突判定
+  if (particles[ m->block_pos_y[2] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[2] - SP_OFS_X     ].attr.color > 0 ||
+      particles[ m->block_pos_y[2] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[2] - SP_OFS_X + 2 ].attr.color > 0 || 
+      particles[ m->block_pos_y[2] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[2] - SP_OFS_X + 4 ].attr.color > 0 || 
+      particles[ m->block_pos_y[2] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[2] - SP_OFS_X + 6 ].attr.color > 0) return 1;
+
+  // ブロック3の下面と砂の衝突判定
+  if (particles[ m->block_pos_y[3] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[3] - SP_OFS_X     ].attr.color > 0 ||
+      particles[ m->block_pos_y[3] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[3] - SP_OFS_X + 2 ].attr.color > 0 || 
+      particles[ m->block_pos_y[3] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[3] - SP_OFS_X + 4 ].attr.color > 0 || 
+      particles[ m->block_pos_y[3] - SP_OFS_Y + NUM_SANDS_Y ][ m->block_pos_x[3] - SP_OFS_X + 6 ].attr.color > 0) return 1;
+
+  return 0;
 }
 
 //
 //  8x12ドットの範囲に砂を配置する
 //
-static void put_particles(int16_t pos_x, int16_t pos_y, int16_t color) {
+static void particle_put(int16_t pos_x, int16_t pos_y, int16_t color) {
   
   // 色グループ (bit0,1)
   int16_t c_group = color & 3;
@@ -336,6 +504,32 @@ static void put_particles(int16_t pos_x, int16_t pos_y, int16_t color) {
 
     }
   }
+}
+
+//
+//  ミノ：砂化
+//
+static void mino_deploy_sands(MINO* m) {
+
+  uint16_t pattern = MINO_PATTERNS[m->type][m->rotation];
+
+  // 4x4の格子をスキャン
+  for (int16_t i = 0; i < 16; i++) {
+    // ビットが立っているか（最上位ビットからチェック）
+    if (pattern & (0x8000 >> i)) {
+      int16_t block_x = i % 4;
+      int16_t block_y = i / 4;                
+      particle_put(m->pos_x - SP_OFS_X + block_x * NUM_SANDS_X, m->pos_y - SP_OFS_Y + block_y * NUM_SANDS_Y, m->color);
+    }
+  }
+
+  // 砂になったので属性初期化
+  m->type = -1;
+  m->rotation = -1;
+  m->color = -1;
+
+  // VSYNC割り込みハンドラー内で消してもらう
+  block_event_delete = 1;
 }
 
 //
@@ -433,9 +627,12 @@ static void init_sp_pcg() {
     }
   }
   for (int16_t y = 0; y < 30; y++) {
-    int16_t p = (y == 0) ? 17 : (y == 29) ? 18 : 18;    // 19 : 18
+    int16_t p = (y == 0) ? 17 : 18;
     BG_TEXT1[ y * 64 + 2 ] = 0x200 + p;
     BG_TEXT1[ y * 64 + 2 + 11 ] = 0x200 + p;
+  }
+  for (int16_t x = 0; x < 12; x++) {
+    BG_TEXT1[ 30 * 64 + 2 + x ] = 0x200 + 19;
   }
 
   *BG_CTRL = 0x203;   // SP/BG ON, BG1-BGTEXT0, BG0-BGTEXT1, BG1 OFF, BG0 ON 
@@ -479,6 +676,24 @@ static void int_to_ascii_right(uint8_t* buf, int16_t digits, uint32_t val) {
       buf[i] = ' ';
     }
   }
+}
+
+//
+//  ハイスコア表示
+//
+static void put_hi_score(uint32_t hi_score) {
+  static uint8_t mes[32];
+  int_to_ascii_right(mes,8,hi_score);
+  put_text_8x8(144,16,3,1,mes);
+}
+
+//
+//  スコア表示
+//
+static void put_score(uint32_t score) {
+  static uint8_t mes[32];
+  int_to_ascii_right(mes,8,score);
+  put_text_8x8(144,48,3,1,mes);
 }
 
 //
@@ -527,6 +742,187 @@ static int16_t wait_game_over() {
   put_text_8x8(28,128,3,1,"         ");
 
   return 0;
+}
+
+//
+//  左右連結した砂の点滅
+//
+static void flash_sands(int16_t fire_c, int16_t flash_on) {
+  
+  // 火のルートが始まったかどうかを記録するフラグ
+  int16_t fire_started = 0;
+
+  // 上から下へ走査
+  for (int16_t fy = 0; fy < FIELD_SIZE_Y / 2; fy++) {
+
+    BITLINE80 f = valid_fire[fy];
+    
+    if (f.lo == 0 && f.mi == 0 && f.hi == 0) {
+      if (fire_started) {
+        break;
+      }
+      // まだ火のルートが始まっていない（画面上部の空間）なら、
+      // 下の行に本物があるかもしれないので、次の行のチェックへ進む（スキップ）
+      continue;
+    }
+
+    // ここに到達したということは、この行には火がついている！
+    fire_started = 1; // フラグを立てて、ここから延焼地帯であることを記録
+
+    int16_t py0 = fy << 1;
+    int16_t py1 = py0 + 1;
+
+    for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
+      int is_fired = 0;
+      if (px < 32)      { if (f.lo & (1 << px)) is_fired = 1; }
+      else if (px < 64) { if (f.mi & (1 << (px - 32))) is_fired = 1; }
+      else              { if (f.hi & (1 << (px - 64))) is_fired = 1; }
+
+      if (is_fired) {
+        // 火が通っているドットの色が、開通した色グループ（fire_c）と一致するか確認
+        // ※ py0のチェック
+        if (particles[py0][px].raw != 0 && ((particles[py0][px].attr.color - 1) & 3) == fire_c) {
+          if (flash_on) {
+            // ONのとき：元の色グループ（0〜3）に対応する白パレット（13, 14, 15など）をぶち込む
+            screen_buffers[page_calc][py0][px] = 13 + ((particles[py0][px].attr.color - 1) >> 2);
+          } else {
+            // OFFのとき：元の砂の色（particlesに保存されている色）に戻す
+            screen_buffers[page_calc][py0][px] = particles[py0][px].attr.color;
+          }
+          invalidates[page_calc][py0] = 1; // 画面書き換えフラグを立てる
+        }
+
+        // ※ py1のチェック
+        if (py1 < FIELD_SIZE_Y && particles[py1][px].raw != 0 && ((particles[py1][px].attr.color - 1) & 3) == fire_c) {
+          if (flash_on) {
+            screen_buffers[page_calc][py1][px] = 13 + ((particles[py1][px].attr.color - 1) >> 2);
+          } else {
+            screen_buffers[page_calc][py1][px] = particles[py1][px].attr.color;
+          }
+          invalidates[page_calc][py1] = 1;
+        }
+      }
+    } // px
+  } // fy
+}
+
+//
+//  左右連結した砂の消去
+//
+static int32_t clear_sands(int16_t fire_c) {
+    
+  int32_t deleted_pixels = 0; // ★ 今回一度に消したドット数のカウンタ
+
+  // 火のルートが始まったかどうかを記録するフラグ
+  int16_t fire_started = 0;
+
+  // 上から下へ走査
+  for (int16_t fy = 0; fy < FIELD_SIZE_Y / 2; fy++) {
+
+    BITLINE80 f = valid_fire[fy];
+    
+    if (f.lo == 0 && f.mi == 0 && f.hi == 0) {
+      if (fire_started) {
+        break;
+      }
+      // まだ火のルートが始まっていない（画面上部の空間）なら、
+      // 下の行に本物があるかもしれないので、次の行のチェックへ進む（スキップ）
+      continue;
+    }
+
+    // ここに到達したということは、この行には火がついている！
+    fire_started = 1; // フラグを立てて、ここから延焼地帯であることを記録
+
+    // 縦2ドット分の画面Y座標を復元
+    int16_t py0 = fy << 1;
+    int16_t py1 = py0 + 1;
+
+    // 横80ドットを走査
+    for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
+
+      int is_fired = 0;
+
+      if (px < 32) {
+        if (f.lo & (1 << px)) is_fired = 1;
+      } else if (px < 64) {
+        if (f.mi & (1 << (px - 32))) is_fired = 1;
+      } else {
+        if (f.hi & (1 << (px - 64))) is_fired = 1;
+      }
+
+      if (is_fired) {
+        
+        // 下段（py0）の個別消去 ＆ ウェイクアップ
+        if (particles[py0][px].raw != 0) {
+
+          int16_t current_p_color0 = (particles[py0][px].attr.color - 1) & 3;
+          
+          if (current_p_color0 == fire_c) {
+            // py0が消えるので、その「真上（py0 - 1）」を叩き起こす
+            int16_t upper_y0 = py0 - 1;
+            if (upper_y0 >= 0 && particles[upper_y0][px].attr.moment_x == -4) {
+              particles[upper_y0][px].attr.moment_x = 0; 
+              invalidates[page_calc][upper_y0] = 1;
+            }
+
+            // py0を消去
+            particles[py0][px].raw = 0;
+            screen_buffers[page_calc][py0][px] = 0;
+            invalidates[page_calc][py0] = 1;
+            deleted_pixels++;
+          }
+        }
+
+        // 上段（py1）の個別消去 ＆ ウェイクアップ ---
+        if (py1 < FIELD_SIZE_Y && particles[py1][px].raw != 0) {
+          
+          int16_t current_p_color1 = (particles[py1][px].attr.color - 1) & 3;
+          
+          if (current_p_color1 == fire_c) {
+            // ★ py1が消えるので、その「真上（つまりpy0）」を叩き起こす
+            // ※ただし、py0が「このフレームで一緒に消える対象」なら起こす必要はないが、
+            // もし別色で生き残る砂なら、ここで起こす必要あり
+            if (particles[py0][px].attr.moment_x == -4) {
+              particles[py0][px].attr.moment_x = 0; 
+              invalidates[page_calc][py0] = 1;
+            }
+
+            // py1を消去
+            particles[py1][px].raw = 0;
+            screen_buffers[page_calc][py1][px] = 0;
+            invalidates[page_calc][py1] = 1;
+            deleted_pixels++;
+          }
+        }
+
+      }
+    }
+  }
+
+  // すべての色（4色分）の coarse_map を一旦完全に初期化
+  memset(coarse_map, 0, sizeof(coarse_map));
+
+  // 今画面に生き残っているすべての粒子データ（particles）を走査して、
+  // 今の正しい座標で coarse_map を一から完全に再構築
+  for (int16_t py = 0; py < FIELD_SIZE_Y; py++) {
+    int16_t cy = py >> 1; // 縦2ドット単位
+    for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
+      if (particles[py][px].raw != 0) {
+        int16_t mx = particles[py][px].attr.moment_x;
+        int16_t my = particles[py][px].attr.moment_y;
+        // スリープ・静止しているものだけを対象にする
+        if (mx == -4 || (mx == 0 && my == 0)) {
+          int16_t col_group = (particles[py][px].attr.color - 1) & 3;
+          if (px < 32)        coarse_map[col_group][cy].lo |= (1 << px);
+          else if (px < 64)   coarse_map[col_group][cy].mi |= (1 << (px - 32));
+          else                coarse_map[col_group][cy].hi |= (1 << (px - 64));
+
+        }
+      }
+    }
+  }
+
+  return deleted_pixels;
 }
 
 //
@@ -586,13 +982,11 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 game_start:
 
   // ハイスコア表示(値の初期化はしない)
-  int_to_ascii_right(score_mes,8,hi_score);
-  put_text_8x8(144,16,3,1,score_mes);
+  put_hi_score(hi_score);
 
   // スコア初期化
   uint32_t score = 0;
-  int_to_ascii_right(score_mes,8,score);
-  put_text_8x8(144,48,3,1,score_mes);
+  put_score(score);
   
   // 物理演算バッファ(1面のみ)初期化
   memset(particles, 0, sizeof(PARTICLE) * FIELD_SIZE_Y * FIELD_SIZE_X);
@@ -611,9 +1005,8 @@ game_start:
 
   // カウンタ
   uint32_t counter = 0;                   // 汎用
+  uint32_t mino_next_counter = 0;         // 次のミノが出現するまでのカウンタ
   uint32_t clear_freeze_counter = 0;      // 左右連結イベント発生時のカウンタ
-  uint32_t deploy_freeze_counter = 0;     // 着地イベント発生時のカウンタ
-  uint32_t mino_counter = 0;              // 出現ミノ数カウント用
 
   // 連鎖カウンタ
   int16_t combo_count = 0;                // 現在の連鎖数（0 = 連鎖なし、1 = 2連鎖目...
@@ -622,29 +1015,32 @@ game_start:
   // 左右連結した色保持用
   int16_t fire_c = -1;
 
-  // ボタン押しっぱなし判定用
-  int16_t trigger_a = 0;
-  int16_t trigger_b = 0;
-
-  // 操作ミノ用スプライト種別と位置
-  int16_t sp_mino = -1;
-  int16_t sp_rotation = -1;
-  int16_t sp_pos_x = -1;
-  int16_t sp_pos_y = -1;
-
+  // 操作ミノ初期化
+  mino.type = -1;
+  mino.rotation = -1;
+  mino.color = -1;
+  mino.pos_x = -1;
+  mino.pos_y = -1;
+  
   // NEXTミノ初期化
-  int16_t sp_mino_next = rand() % 7;
-  int16_t sp_rotation_next = rand() % 4;
-  sp_color_next = rand() % 4;
-  locate_mino(SP_OFS_X_NEXT, SP_OFS_Y_NEXT, sp_mino_next, sp_rotation_next, sp_x_next, sp_y_next);
+  mino_next.type = rand() % 7;
+  mino_next.rotation = rand() % 4;
+  mino_next.color = rand() % 4;
+  mino_next.pos_x = MINO_NEXT_POS_X;
+  mino_next.pos_y = MINO_NEXT_POS_Y;
+  mino_locate_blocks(&mino_next);
 
   // グローバル変数初期化
+  mino_counter = 0;
   page_render = 0;
   page_calc = 1;
   page_next = 0;
+  trigger_a = 0;
+  trigger_b = 0;
   block_event_new = 0;
   block_event_delete = 0;
   block_event_new = 0;
+  deploy_freeze_counter = 0;
 
   // 開始待ち
   if (wait_game_start() != 0) {
@@ -664,16 +1060,16 @@ game_start:
   // ゲームメインループ
   while (!game_over) {
 
-    // ESCキーが押されたら終了
-    if (_iocs_b_keysns() != 0) {
+    // このフレームで物理を動かすかどうか
+    int16_t run_physics = 1;
+
+    // ESCキーが押されたら終了 (8フレームごとのチェック)
+    if ((counter & 7) == 0 && _iocs_b_keysns() != 0) {
       int16_t scan_code = _iocs_b_keyinp() >> 8;
       if (scan_code == KEY_SCAN_CODE_ESC) {
         goto exit;
       }
     }
-
-    // このフレームで物理を動かすかどうか
-    int16_t run_physics = 1;
 
     // 連鎖受付タイマーのカウントダウン
     if (combo_valid_counter > 0) {
@@ -689,154 +1085,23 @@ game_start:
       clear_freeze_counter--;
 
       // カウントダウン途中（タイマー > 0）の明滅演出
-      if (clear_freeze_counter > 0 && fire_c >= 0 && (clear_freeze_counter % 4) == 0) {
+      if (clear_freeze_counter > 0 && fire_c >= 0 && (clear_freeze_counter & 3) == 0) {
 
         // タイマーのビット3を使って、4フレームごとに「点滅のON/OFF」を切り替える
         int16_t flash_on = (clear_freeze_counter & 4); 
 
-        // 開通した「火のルート」だけを走査
-        for (int16_t fy = FIELD_SIZE_Y/2 - 1; fy >= 0; fy--) {
-
-          BITLINE80 f = fire[fy];
-          if (f.lo == 0 && f.mi == 0 && f.hi == 0) continue;
-
-          int16_t py0 = fy << 1;
-          int16_t py1 = py0 + 1;
-
-          for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
-            int is_fired = 0;
-            if (px < 32)      { if (f.lo & (1 << px)) is_fired = 1; }
-            else if (px < 64) { if (f.mi & (1 << (px - 32))) is_fired = 1; }
-            else              { if (f.hi & (1 << (px - 64))) is_fired = 1; }
-
-            if (is_fired) {
-              // 火が通っているドットの色が、開通した色グループ（fire_c）と一致するか確認
-              // ※ py0のチェック
-              if (particles[py0][px].raw != 0 && ((particles[py0][px].attr.color - 1) & 3) == fire_c) {
-                if (flash_on) {
-                  // ONのとき：元の色グループ（0〜3）に対応する白パレット（13, 14, 15など）をぶち込む
-                  screen_buffers[page_calc][py0][px] = 13 + ((particles[py0][px].attr.color - 1) >> 2);
-                } else {
-                  // OFFのとき：元の砂の色（particlesに保存されている色）に戻す
-                  screen_buffers[page_calc][py0][px] = particles[py0][px].attr.color;
-                }
-                invalidates[page_calc][py0] = 1; // 画面書き換えフラグを立てる
-              }
-
-              // ※ py1のチェック
-              if (py1 < FIELD_SIZE_Y && particles[py1][px].raw != 0 && ((particles[py1][px].attr.color - 1) & 3) == fire_c) {
-                if (flash_on) {
-                  screen_buffers[page_calc][py1][px] = 13 + ((particles[py1][px].attr.color - 1) >> 2);
-                } else {
-                  screen_buffers[page_calc][py1][px] = particles[py1][px].attr.color;
-                }
-                invalidates[page_calc][py1] = 1;
-              }
-            }
-          } // px
-        } // fy
+        // エリア点滅実施 (スクリーンバッファのカラーコード書き換えのみ、実際の点滅はVSYNC割り込みハンドラにまかせる)
+        flash_sands(fire_c, flash_on);
       }
 
       // カウントダウン終了時には実際に消す
       if (clear_freeze_counter == 0 && fire_c >= 0) {
-        
-        int32_t deleted_pixels = 0; // ★ 今回一度に消したドット数のカウンタ
 
-        for (int16_t fy = FIELD_SIZE_Y/2 - 1; fy >= 0; fy--) {
+        // エリア消去実施 (実際の消去はVSYNC割り込みハンドラにまかせる)
+        int32_t deleted_pixels = clear_sands(fire_c);
 
-          BITLINE80 f = fire[fy];
-
-          // この行に火（繋がっているドット）が1つもなければ、行丸ごとスキップ
-          if (f.lo == 0 && f.mi == 0 && f.hi == 0) continue;
-
-          // 縦2ドット分の画面Y座標を復元
-          int16_t py0 = fy << 1;
-          int16_t py1 = py0 + 1;
-
-          // 横80ドットを走査
-          for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
-
-            int is_fired = 0;
-
-            if (px < 32) {
-              if (f.lo & (1 << px)) is_fired = 1;
-            } else if (px < 64) {
-              if (f.mi & (1 << (px - 32))) is_fired = 1;
-            } else {
-              if (f.hi & (1 << (px - 64))) is_fired = 1;
-            }
-
-            if (is_fired) {
-              
-              // 下段（py0）の個別消去 ＆ ウェイクアップ
-              if (particles[py0][px].raw != 0) {
-
-                int16_t current_p_color0 = (particles[py0][px].attr.color - 1) & 3;
-                
-                if (current_p_color0 == fire_c) {
-                  // py0が消えるので、その「真上（py0 - 1）」を叩き起こす
-                  int16_t upper_y0 = py0 - 1;
-                  if (upper_y0 >= 0 && particles[upper_y0][px].attr.moment_x == -4) {
-                    particles[upper_y0][px].attr.moment_x = 0; 
-                    invalidates[page_calc][upper_y0] = 1;
-                  }
-
-                  // py0を消去
-                  particles[py0][px].raw = 0;
-                  screen_buffers[page_calc][py0][px] = 0;
-                  invalidates[page_calc][py0] = 1;
-                  deleted_pixels++;
-                }
-              }
-
-              // 上段（py1）の個別消去 ＆ ウェイクアップ ---
-              if (py1 < FIELD_SIZE_Y && particles[py1][px].raw != 0) {
-                
-                int16_t current_p_color1 = (particles[py1][px].attr.color - 1) & 3;
-                
-                if (current_p_color1 == fire_c) {
-                  // ★ py1が消えるので、その「真上（つまりpy0）」を叩き起こす
-                  // ※ただし、py0が「このフレームで一緒に消える対象」なら起こす必要はないが、
-                  // もし別色で生き残る砂なら、ここで起こす必要あり
-                  if (particles[py0][px].attr.moment_x == -4) {
-                    particles[py0][px].attr.moment_x = 0; 
-                    invalidates[page_calc][py0] = 1;
-                  }
-
-                  // py1を消去
-                  particles[py1][px].raw = 0;
-                  screen_buffers[page_calc][py1][px] = 0;
-                  invalidates[page_calc][py1] = 1;
-                  deleted_pixels++;
-                }
-              }
-
-            }
-          }
-        }
-
-        // すべての色（4色分）の coarse_map を一旦完全に初期化
-        memset(coarse_map, 0, sizeof(coarse_map));
-
-        // 今画面に生き残っているすべての粒子データ（particles）を走査して、
-        // 今の正しい座標で coarse_map を一から完全に再構築
-        for (int16_t py = 0; py < FIELD_SIZE_Y; py++) {
-          int16_t cy = py >> 1; // 縦2ドット単位
-          for (int16_t px = 0; px < FIELD_SIZE_X; px++) {
-            if (particles[py][px].raw != 0) {
-              int16_t mx = particles[py][px].attr.moment_x;
-              int16_t my = particles[py][px].attr.moment_y;
-              // スリープ・静止しているものだけを対象にする
-              if (mx == -4 || (mx == 0 && my == 0)) {
-                int16_t col_group = (particles[py][px].attr.color - 1) & 3;
-                if (px < 32)        coarse_map[col_group][cy].lo |= (1 << px);
-                else if (px < 64)   coarse_map[col_group][cy].mi |= (1 << (px - 32));
-                else                coarse_map[col_group][cy].hi |= (1 << (px - 64));
-
-              }
-            }
-          }
-        }
+        // 開通色のリセット
+        fire_c = -1;
 
         // スコアアップ
         if (deleted_pixels > 0) {
@@ -847,17 +1112,13 @@ game_start:
           int32_t combo_bonus = 1 << combo_count; 
             
           score += base_score * combo_bonus;
-          sprintf(score_mes,"%8d",score);
-          put_text_8x8(144,48,3,1,score_mes);
+          put_score(score);
 
           // 物理が再開するここから「120フレーム（2秒）」、次の連鎖を受け付ける
           // 2連鎖、3連鎖と続くほど、受付時間を少し長めにする
           combo_valid_counter = 120 + (combo_count * 20); 
 
         }
-
-        // 開通色のリセット
-        fire_c = -1;
 
       }
 
@@ -869,207 +1130,83 @@ game_start:
     // メインループ内物理演算
     if (run_physics) {
 
+      // 汎用カウンタ(物理演算時のみ)
+      counter++;
+
       // 着地フリーズイベントが発生しておらず、ミノが存在している場合はパッド操作を受け付ける
-      if (deploy_freeze_counter == 0 && sp_mino >= 0) {
-
-        // IOCSコールではなくポート直読み
-        //uint32_t j = _iocs_joyget(0);
-        uint8_t j = *((volatile uint8_t*)(0x0e9a001));
-
-        // 左が押された？
-        if ((j & 4) == 0) {
-          // まだ移動できる？
-          if (sp_x[0] > SP_OFS_X && 
-              sp_x[1] > SP_OFS_X && 
-              sp_x[2] > SP_OFS_X && 
-              sp_x[3] > SP_OFS_X) {
-                sp_pos_x -= 2;
-                sp_x[0] -= 2;
-                sp_x[1] -= 2;
-                sp_x[2] -= 2; 
-                sp_x[3] -= 2;     
-          }          
-        }
-
-        // 右が押された？
-        if ((j & 8) == 0) {
-          // まだ移動できる？
-          if ((sp_x[0] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X) && 
-              (sp_x[1] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X) &&
-              (sp_x[2] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X) && 
-              (sp_x[3] + NUM_SANDS_X) < (SP_OFS_X + FIELD_SIZE_X)) {
-                sp_pos_x += 2;
-                sp_x[0] += 2;
-                sp_x[1] += 2;
-                sp_x[2] += 2; 
-                sp_x[3] += 2;
-          }
-        }
-
-        // 下が押された？
-        if ((j & 2) == 0) {
-          // まだ移動できる？
-          if ((sp_y[0] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y) &&
-              (sp_y[1] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y) &&
-              (sp_y[2] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y) &&
-              (sp_y[3] + NUM_SANDS_Y) < (SP_OFS_Y + FIELD_SIZE_Y)) {
-                sp_pos_y += 3;
-                sp_y[0] += 3;
-                sp_y[1] += 3;
-                sp_y[2] += 3;
-                sp_y[3] += 3;
-          }
-        }
-
-        // ボタンBが押された?
-        if ((j & 0x40) == 0 && trigger_b == 0) {
-          // 回転できそうなら回転する
-          if (locate_mino_check(sp_pos_x, sp_pos_y, sp_mino, (sp_rotation + 1) % 4)) {
-            sp_rotation = (sp_rotation + 1) % 4;
-            locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
-            trigger_b = 1; // 押しっぱなしで回転しつづけないように
-          }
-        }
-        if ((j & 0x40)) {
-          // ボタンBが離された
-          trigger_b = 0;
-        }
-
-        // ボタンAが押された？
-        if ((j & 0x20) == 0 && trigger_a == 0) {
-          // 回転できそうなら回転する
-          if (locate_mino_check(sp_pos_x, sp_pos_y, sp_mino, (sp_rotation + 3) % 4)) {
-            sp_rotation = (sp_rotation + 3) % 4;
-            locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
-            trigger_a = 1; // 押しっぱなしで回転しつづけないように
-          }
-        }
-        if ((j & 0x20)) {
-          // ボタンBが離された
-          trigger_a = 0;
-        }
-
-        // ミノの自然落下
-        if (mino_counter < 10) {
-          if ((counter % 2) == 0) {
-            sp_pos_y++;
-            sp_y[0]++;
-            sp_y[1]++;
-            sp_y[2]++;
-            sp_y[3]++;
-          }
-        } else if (mino_counter < 20) {
-          sp_pos_y++;
-          sp_y[0]++;
-          sp_y[1]++;
-          sp_y[2]++;
-          sp_y[3]++;          
-        } else {
-          sp_pos_y += 2;
-          sp_y[0] += 2;
-          sp_y[1] += 2;
-          sp_y[2] += 2;
-          sp_y[3] += 2;         
-        }
-
+      if (deploy_freeze_counter == 0 && mino.type >= 0) {
+        mino_move(&mino, counter);
       }
 
       // 新規ミノの出現
-      if ((counter % 200) == 0 && sp_mino < 0) {
+      if (mino_next_counter > 0) {
+        mino_next_counter--;
+      } else {
+        if (mino.type < 0) {
 
-        // 新規ミノの種別はNEXTミノの属性をコピー
-        sp_mino = sp_mino_next;
-        sp_rotation = sp_rotation_next;
-        sp_color = sp_color_next;
-        sp_pos_x = SP_INIT_POS_X;
-        sp_pos_y = SP_INIT_POS_Y;
-        locate_mino(sp_pos_x, sp_pos_y, sp_mino, sp_rotation, sp_x, sp_y);
-        mino_counter++;
-        block_event_new = 1;    // VSYNC割り込みハンドラ内で描画してもらう
+          // 新規ミノの種別・回転・色はNEXTミノの属性をコピー
+          mino.type = mino_next.type;
+          mino.rotation = mino_next.rotation;
+          mino.color = mino_next.color;
+          mino.pos_x = MINO_INIT_POS_X;     // 初期位置は固定
+          mino.pos_y = MINO_INIT_POS_Y;
+          mino_locate_blocks(&mino);
+          mino_counter++;
+          block_event_new = 1;    // VSYNC割り込みハンドラ内で描画してもらう
 
-        // NEXTミノはランダムに定める
-        sp_mino_next = rand() % 7;
-        sp_rotation_next = rand() % 4;
-        sp_color_next = rand() % 4;
-        locate_mino(SP_OFS_X_NEXT, SP_OFS_Y_NEXT, sp_mino_next, sp_rotation_next, sp_x_next, sp_y_next);
-        block_event_next = 1;   // VSYNC割り込みハンドラ内で描画してもらう
-
+          // NEXTミノはランダムに定める
+          mino_next.type = rand() % 7;
+          mino_next.rotation = rand() % 4;
+          mino_next.color = rand() % 4;
+          mino_locate_blocks(&mino_next);
+          block_event_next = 1;   // VSYNC割り込みハンドラ内で描画してもらう
+        }
       }      
 
       // ミノの着地判定
-      if (sp_mino >= 0 && (
-          (sp_y[0] - 16 + 12 >= 240 || sp_y[1] - 16 + 12 >= 240 || sp_y[2] - 16 + 12 >= 240 || sp_y[3] - 16 + 12 >= 240) ||
+      if (mino.type >= 0) {
 
-          (particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24    ].attr.color > 0 ||
-          particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24 + 2].attr.color > 0 || 
-          particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24 + 4].attr.color > 0 || 
-          particles[sp_y[0] - 16 + 12][sp_x[0] - 16 - 24 + 6].attr.color > 0) ||
+        // 砂または床に衝突したか？
+        if (mino_check_collision(&mino)) {
 
-          (particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24    ].attr.color > 0 ||
-          particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24 + 2].attr.color > 0 || 
-          particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24 + 4].attr.color > 0 || 
-          particles[sp_y[1] - 16 + 12][sp_x[1] - 16 - 24 + 6].attr.color > 0) ||
+          // 画面上での衝突ならゲームオーバー
+          if (mino.pos_y < MINO_OVER_POS_Y) {  
 
-          (particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24    ].attr.color > 0 ||
-          particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24 + 2].attr.color > 0 || 
-          particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24 + 4].attr.color > 0 || 
-          particles[sp_y[2] - 16 + 12][sp_x[2] - 16 - 24 + 6].attr.color > 0) ||
+            // 最後の画面更新が必要なのでフラグを立てるだけ
+            game_over = 1;    
 
-          (particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24    ].attr.color > 0 ||
-          particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 2].attr.color > 0 || 
-          particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 4].attr.color > 0 || 
-          particles[sp_y[3] - 16 + 12][sp_x[3] - 16 - 24 + 6].attr.color > 0))) {
+          } else {
+  
+            // それ以外の場合は砂化を行う
+            mino_deploy_sands(&mino);
 
-        if (sp_pos_y < 24) {
-
-          // ゲームオーバー
-          game_over = 1;    // 最後の画面更新が必要なのでフラグを立てるだけ
-
-        } else {
-
-          //_iocs_adpcmout(pcm_noise1,4*256+3,sizeof(pcm_noise1));
-
-          deploy_freeze_counter = 8;
+            // 衝突イベントカウンタ初期化
+            deploy_freeze_counter = 8;
           
-          uint16_t pattern = MINO_TABLE[sp_mino][sp_rotation];
+            // スコアアップ
+            score += 100;
+            put_score(score);
 
-          // 4x4の格子をスキャン
-          for (int16_t i = 0; i < 16; i++) {
-            // ビットが立っているか（最上位ビットからチェック）
-            if (pattern & (0x8000 >> i)) {
-              int16_t block_x = i % 4;
-              int16_t block_y = i / 4;                
-              put_particles(sp_pos_x - SP_OFS_X + block_x * NUM_SANDS_X, sp_pos_y - SP_OFS_Y + block_y * NUM_SANDS_Y, sp_color);
+            // 次のミノが出現するまでのカウンタ
+            if (mino_counter < 20) {
+              mino_next_counter = 55;
+            } else if (mino_counter < 40) {
+              mino_next_counter = 35;
+            } else {
+              mino_next_counter = 15;
             }
           }
 
-          sp_mino = -1;
-          sp_rotation = -1;
-          sp_color = -1;
-
-          counter = 150;
-
-          // スコアアップ
-          score += 100;
-          sprintf(score_mes,"%8d",score);
-          put_text_8x8(144,48,3,1,score_mes);
-
-          block_event_delete = 1;
         }
       }
 
-      counter++;
-
-      // 砂の動き(下から)
+      // 物理演算：砂の動き(下から)
       for (int16_t y = FIELD_SIZE_Y-2; y >= 0; y--) {
 
         for (int16_t x = 0; x < FIELD_SIZE_X; x++) {
           
           // 砂がない、またはスリープ状態ならスキップ
-          if (particles[y][x].attr.color == 0) {
-            continue;
-          }
-          if (particles[y][x].attr.moment_x == -4) {
+          if (particles[y][x].attr.color == 0 || particles[y][x].attr.moment_x == -4) {
             continue;
           }
 
@@ -1304,146 +1441,187 @@ game_start:
         int16_t c = (counter >> 1) & 3;
 //        for (int16_t c = 0; c < 4; c++) {   // 4色
 
-          // 【超高速事前チェック】左端の縦一列に、この色の砂が1粒でもあるか？
-          //uint32_t left_wall_check = 0;
-          //for (int16_t y = 0; y < FIELD_SIZE_Y/2; y++) {
-          //  left_wall_check |= coarse_map[c][y].lo & 1;
-          //}
-
-          // 左端に1粒も触れていなければ、その色は開通の可能性ゼロ！
-          // 100回の重い延焼ループを丸ごとスルーして次の色へ！
-          //if (left_wall_check == 0) {
-          //  continue;
-          //}
-
-          // 【初期化】各行の「左端（ビット0）に砂がある場所」だけに火をつける
-          for (int16_t y = 0; y < FIELD_SIZE_Y/2; y++) {
-            fire[y].lo = coarse_map[c][y].lo & 1;
-            fire[y].mi = 0;
-            fire[y].hi = 0; 
-          }
-
-          // 延焼ループ（横80bitを流し切るため100回）
-          for (int16_t iter = 0; iter < 100; iter++) {
-
-            int changed = 0; // 変化があったかのフラグ
-
-            for (int16_t y = FIELD_SIZE_Y/2 - 1; y >= 0; y--) {
-
-              BITLINE80 current_sand = coarse_map[c][y]; 
-              BITLINE80 f = fire[y];
-
-              // その行に砂が1粒もなければ、上下左右の計算をすべて飛ばす
-              if (current_sand.lo == 0 && current_sand.mi == 0 && current_sand.hi == 0 &&
-                  f.lo == 0 && f.mi == 0 && f.hi == 0) {
-                  continue;
-              }
-
-              BITLINE80 next_f;
-
-              // --- 火を「右（ビットが増える方向 = << 1）」へ広げる ---
-              uint32_t carry_lo = f.lo >> 31; // loの最上位は、miの最下位(ビット0)へ
-              uint32_t carry_mi = f.mi >> 31; // miの最上位は、hiの最下位(ビット0)へ
-              
-              next_f.lo = (f.lo << 1);
-              next_f.mi = (f.mi << 1) | carry_lo;
-              next_f.hi = (f.hi << 1) | carry_mi;
-
-              // --- 火を「左（ビットが減る方向 = >> 1）」へ広げる（折り返し用） ---
-              uint32_t borrow_mi = (f.mi & 1) << 31; // miの最下位は、loの最上位(ビット31)へ
-              uint32_t borrow_hi = (f.hi & 1) << 31; // hiの最下位は、miの最上位(ビット31)へ
-
-              next_f.lo |= (f.lo >> 1) | borrow_mi;
-              next_f.mi |= (f.mi >> 1) | borrow_hi;
-              next_f.hi |= (f.hi >> 1);
-
-              // 自分の今の位置の火も保持
-              next_f.lo |= f.lo;
-              next_f.mi |= f.mi;
-              next_f.hi |= f.hi;
-
-              // 砂がない場所の火を消す
-              next_f.lo &= current_sand.lo; 
-              next_f.mi &= current_sand.mi; 
-              next_f.hi &= current_sand.hi; 
-
-              // --- 上下の行から火をもらってくる ---
-              // 上下の行で「お互いに砂が存在するX座標」だけを抽出し、そこを通ってきた火だけを混ぜる
-              if (y > 0)  {
-                BITLINE80 upper_sand = coarse_map[c][y-1];
-                next_f.lo |= (fire[y-1].lo & upper_sand.lo & current_sand.lo);
-                next_f.mi |= (fire[y-1].mi & upper_sand.mi & current_sand.mi);
-                next_f.hi |= (fire[y-1].hi & upper_sand.hi & current_sand.hi);
-              }
-              if (y < (FIELD_SIZE_Y/2 - 1)) {
-                BITLINE80 lower_sand = coarse_map[c][y+1];
-                next_f.lo |= fire[y+1].lo & lower_sand.lo & current_sand.lo;
-                next_f.mi |= fire[y+1].mi & lower_sand.mi & current_sand.mi;
-                next_f.hi |= fire[y+1].hi & lower_sand.hi & current_sand.hi;
-              }
-
-              // もし前回の火のマップから変化があったらフラグを立てる
-              if (next_f.lo != f.lo || next_f.mi != f.mi || next_f.hi != f.hi) {
-                changed = 1;
-              }
-              
-              // 火のマップを更新
-              fire[y].lo = next_f.lo;
-              fire[y].mi = next_f.mi;
-              fire[y].hi = next_f.hi;
-            }
-
-            // 今回の走査で全く変化がなければ中止
-            if (!changed) break;
-          }
-
-          // 【最終判定】どこか2行が右端（ビット79=hiのビット15）に火が到達していれば開通！
-          int connected = 0;
-          for (int16_t y = FIELD_SIZE_Y/2 - 2; y >= 0; y--) {
-            if ((fire[y].hi & (1 << 15)) && (fire[y+1].hi & (1 << 15))) {
-
-              clear_freeze_counter = 55;  // タイマーセット
-              fire_c = c;
-
-              if (combo_valid_counter > 0) {
-                // 前回の消去から時間内なら、連鎖数をアップ！
-                combo_count++; 
-              } else {
-                // 時間外（単発消去）なら、ここから連鎖スタート（combo_count = 0）
-                combo_count = 0; 
-              }
-
-              // フリーズ演出に入るので、受付タイマーは一旦止める（フリーズ中は減算しない）
-              combo_valid_counter = 0;
-
-              connected = 1;
-              break; // 内側の判定yループを抜ける
-            }
-          }
-
-          // 【修正3】この色で消去が発生したら、他の色の処理をせず今回の判定フレームを完了する
-          //if (connected) break; 
+        // 【初期化】各行の「左端（ビット0）に砂がある場所」だけに火をつける
+        for (int16_t y = 0; y < FIELD_SIZE_Y/2; y++) {
+          fire[y].lo = coarse_map[c][y].lo & 1;
+          fire[y].mi = 0;
+          fire[y].hi = 0; 
         }
-      
-    
+
+        // 延焼ループ（横80bitを流し切るため100回）
+        for (int16_t iter = 0; iter < 100; iter++) {
+
+          int16_t changed = 0; // 変化があったかのフラグ
+
+          for (int16_t y = FIELD_SIZE_Y/2 - 1; y >= 0; y--) {
+
+            BITLINE80 current_sand = coarse_map[c][y]; 
+            BITLINE80 f = fire[y];
+
+            // その行に砂が1粒もなければ、上下左右の計算をすべて飛ばす
+            if (current_sand.lo == 0 && current_sand.mi == 0 && current_sand.hi == 0 &&
+                f.lo == 0 && f.mi == 0 && f.hi == 0) {
+                continue;
+            }
+
+            BITLINE80 next_f;
+
+            // --- 火を「右（ビットが増える方向 = << 1）」へ広げる ---
+            uint32_t carry_lo = f.lo >> 31; // loの最上位は、miの最下位(ビット0)へ
+            uint32_t carry_mi = f.mi >> 31; // miの最上位は、hiの最下位(ビット0)へ
+            
+            next_f.lo = (f.lo << 1);
+            next_f.mi = (f.mi << 1) | carry_lo;
+            next_f.hi = (f.hi << 1) | carry_mi;
+
+            // --- 火を「左（ビットが減る方向 = >> 1）」へ広げる（折り返し用） ---
+            uint32_t borrow_mi = (f.mi & 1) << 31; // miの最下位は、loの最上位(ビット31)へ
+            uint32_t borrow_hi = (f.hi & 1) << 31; // hiの最下位は、miの最上位(ビット31)へ
+
+            next_f.lo |= (f.lo >> 1) | borrow_mi;
+            next_f.mi |= (f.mi >> 1) | borrow_hi;
+            next_f.hi |= (f.hi >> 1);
+
+            // 自分の今の位置の火も保持
+            next_f.lo |= f.lo;
+            next_f.mi |= f.mi;
+            next_f.hi |= f.hi;
+
+            // 砂がない場所の火を消す
+            next_f.lo &= current_sand.lo; 
+            next_f.mi &= current_sand.mi; 
+            next_f.hi &= current_sand.hi; 
+
+            // 上下の行から火をもらってくる
+            if (y > 0)  {
+              // 真上に砂があることを求める(厳し目)
+//              BITLINE80 upper_sand = coarse_map[c][y-1];
+//              next_f.lo |= ((fire[y-1].lo & upper_sand.lo) & current_sand.lo);
+//              next_f.mi |= ((fire[y-1].mi & upper_sand.mi) & current_sand.mi);
+//              next_f.hi |= ((fire[y-1].hi & upper_sand.hi) & current_sand.hi);
+              // 真上が燃えてるだけでいい(甘め)
+              next_f.lo |= (fire[y-1].lo & current_sand.lo);
+              next_f.mi |= (fire[y-1].mi & current_sand.mi);
+              next_f.hi |= (fire[y-1].hi & current_sand.hi);
+            }
+            if (y < (FIELD_SIZE_Y/2 - 1)) {
+//              BITLINE80 lower_sand = coarse_map[c][y+1];                
+//              next_f.lo |= ((fire[y+1].lo & lower_sand.lo) & current_sand.lo);
+//              next_f.mi |= ((fire[y+1].mi & lower_sand.mi) & current_sand.mi);
+//              next_f.hi |= ((fire[y+1].hi & lower_sand.hi) & current_sand.hi);
+              next_f.lo |= (fire[y+1].lo & current_sand.lo);
+              next_f.mi |= (fire[y+1].mi & current_sand.mi);
+              next_f.hi |= (fire[y+1].hi & current_sand.hi);
+            }
+
+            // もし前回の火のマップから変化があったらフラグを立てる
+            if (next_f.lo != f.lo || next_f.mi != f.mi || next_f.hi != f.hi) {
+              changed = 1;
+            }
+            
+            // 火のマップを更新
+            fire[y].lo = next_f.lo;
+            fire[y].mi = next_f.mi;
+            fire[y].hi = next_f.hi;
+          }
+
+          // 今回の走査で全く変化がなければ中止
+          if (!changed) break;
+        }
+
+        // どこか2行が右端（ビット79=hiのビット15）に火が到達していれば開通
+        int connected = 0;
+        for (int16_t y = FIELD_SIZE_Y/2 - 2; y >= 0; y--) {
+          if ((fire[y].hi & (1 << 15)) && (fire[y+1].hi & (1 << 15))) {
+
+            clear_freeze_counter = 55;  // タイマーセット
+            fire_c = c;
+
+            if (combo_valid_counter > 0) {
+              // 前回の消去から時間内なら、連鎖数をアップ
+              combo_count++; 
+            } else {
+              // 時間外（単発消去）なら、ここから連鎖スタート（combo_count = 0）
+              combo_count = 0; 
+            }
+
+            // フリーズ演出に入るので、受付タイマーは一旦止める（フリーズ中は減算しない）
+            combo_valid_counter = 0;
+
+            connected = 1;
+            break; // 内側の判定yループを抜ける
+          }
+        }
+
+        // 開通したら、今度は右から逆に辿り、実際に開通したルートを明確化する
+        if (connected) {
+
+          memset(valid_fire, 0, sizeof(valid_fire));
+
+          // 1. 右端（X=79）のビットが立っている行を、valid_fire のスタート地点にする
+          for (int16_t y = 0; y < FIELD_SIZE_Y / 2; y++) {
+            if (fire[y].hi & (1 << 15)) {
+              valid_fire[y].hi |= (1 << 15);
+            }
+          }
+
+          // 2. 染め上げループ（fire の床の上だけを伝って、valid_fire を左へ広げる）
+          for (int16_t loop = 0; loop < 100; loop++) {
+            int16_t changed = 0;
+            for (int16_t y = 0; y < FIELD_SIZE_Y / 2; y++) {
+              BITLINE80 current_v = valid_fire[y];
+              BITLINE80 f         = fire[y]; // 順方向の、不発弾が混ざったビットマップ
+
+              BITLINE80 next_v = current_v;
+
+              // 左右の染め出し（ fire がある場所限定 ）
+              next_v.lo |= ((current_v.lo << 1) | (current_v.lo >> 1)) & f.lo;
+          
+              // mi, hi の通常のシフト ＆ 境界跨ぎ（※f.mi, f.hi でマスク）
+              BITLINE80 shifted_mi;
+              shifted_mi.mi = (current_v.mi << 1) | (current_v.mi >> 1);
+              if (current_v.lo & (1 << 31)) shifted_mi.mi |= 1;
+              if (current_v.hi & 1)         shifted_mi.mi |= (1 << 31);
+              next_v.mi |= shifted_mi.mi & f.mi;
+
+              BITLINE80 shifted_hi;
+              shifted_hi.hi = (current_v.hi << 1) | (current_v.hi >> 1);
+              if (current_v.mi & (1 << 31)) shifted_hi.hi |= 1;
+              next_v.hi |= shifted_hi.hi & f.hi;
+
+              BITLINE80 shifted_lo;
+              shifted_lo.lo = (current_v.lo << 1) | (current_v.lo >> 1);
+              if (current_v.mi & 1) shifted_lo.lo |= (1 << 31);
+              next_v.lo |= shifted_lo.lo & f.lo;
+
+              // 上下への染め出し
+              if (y > 0) {
+                  next_v.lo |= valid_fire[y-1].lo & f.lo;
+                  next_v.mi |= valid_fire[y-1].mi & f.mi;
+                  next_v.hi |= valid_fire[y-1].hi & f.hi;
+              }
+              if (y < (FIELD_SIZE_Y / 2 - 1)) {
+                  next_v.lo |= valid_fire[y+1].lo & f.lo;
+                  next_v.mi |= valid_fire[y+1].mi & f.mi;
+                  next_v.hi |= valid_fire[y+1].hi & f.hi;
+              }
+
+              if (next_v.lo != current_v.lo || next_v.mi != current_v.mi || next_v.hi != current_v.hi) {
+                  valid_fire[y] = next_v;
+                  changed = 1;
+              }
+            }
+            if (!changed) break; // 最短即抜け
+          }
+        }
+
+      }
+
     } // if (run_physics) { 
 
     // 物理計算の追い越しガード
     while (page_calc == page_render) {
-        // 次のVSYNC割り込みが page_next を受け取ってくれるまで待機
-    }
-
-    // ブロック着地後の振動イベント (ここは垂直帰線期間内と想定)
-    if (deploy_freeze_counter > 0) {
-
-      switch (deploy_freeze_counter) {
-        case  7: GR0_SCRL[1] = 510; BG0_SCRL[1] = 510; break;
-        case  5: GR0_SCRL[1] = 509; BG0_SCRL[1] = 509; break;
-        case  3: GR0_SCRL[1] = 510; BG0_SCRL[1] = 510; break;
-        case  1: GR0_SCRL[1] =   0; BG0_SCRL[1] =   0; break;
-      }
-
-      deploy_freeze_counter--;
+      // 次のVSYNC割り込みが page_next を受け取ってくれるまで待機
     }
 
     // バッファ間の差分コピー
