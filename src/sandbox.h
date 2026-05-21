@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define VERSION "0.2.0 (2026/05/21)"
+#define VERSION "0.2.0 (2026/05/22)"
 
 #define NUM_SANDS_X (8)
 #define NUM_SANDS_Y (12)

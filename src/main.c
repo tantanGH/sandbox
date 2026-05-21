@@ -172,11 +172,27 @@ static void __attribute__((interrupt)) refresh_screen() {
 
   }
 
-  // グラフィック画面差分描画
-  if (page_render != page_next) {
-    // 次の待機ページを今回の描画ページとする
-    page_render = page_next;
+  // ブロック着地後の振動イベント
+  if (deploy_freeze_counter > 0) {
+
+    switch (deploy_freeze_counter) {
+      case  7: GR0_SCRL[1] = 510; BG0_SCRL[1] = 510; break;
+      case  5: GR0_SCRL[1] = 509; BG0_SCRL[1] = 509; break;
+      case  3: GR0_SCRL[1] = 510; BG0_SCRL[1] = 510; break;
+      case  1: GR0_SCRL[1] =   0; BG0_SCRL[1] =   0; break;
+    }
+
+    deploy_freeze_counter--;
   }
+
+  // グラフィック画面差分描画
+  if (page_render == page_next) {
+    // メインループでの更新が間に合ってなかったようだ
+    return;
+  }
+
+  // 次の待機ページを今回の描画ページとする
+  page_render = page_next;
 
   // グラフィック画面書き込み基準位置は右に少しオフセット
   uint64_t* gp = (uint64_t*)(GVRAM + 24);
@@ -218,19 +234,6 @@ static void __attribute__((interrupt)) refresh_screen() {
       fp += FIELD_SIZE_X/4;
 
     }
-  }
-
-  // ブロック着地後の振動イベント
-  if (deploy_freeze_counter > 0) {
-
-    switch (deploy_freeze_counter) {
-      case  7: GR0_SCRL[1] = 510; BG0_SCRL[1] = 510; break;
-      case  5: GR0_SCRL[1] = 509; BG0_SCRL[1] = 509; break;
-      case  3: GR0_SCRL[1] = 510; BG0_SCRL[1] = 510; break;
-      case  1: GR0_SCRL[1] =   0; BG0_SCRL[1] =   0; break;
-    }
-
-    deploy_freeze_counter--;
   }
 
 }
@@ -388,7 +391,7 @@ static void mino_move(MINO* m, uint32_t counter) {
   }
 
   // ミノの自然落下
-  if (mino_counter < 10) {
+  if (mino_counter < 20) {
     if ((counter % 2) == 0) {
       m->pos_y++;
       m->block_pos_y[0]++;
@@ -396,13 +399,13 @@ static void mino_move(MINO* m, uint32_t counter) {
       m->block_pos_y[2]++;
       m->block_pos_y[3]++;
     }
-  } else if (mino_counter < 20) {
+  } else if (mino_counter < 40) {
     m->pos_y++;
     m->block_pos_y[0]++;
     m->block_pos_y[1]++;
     m->block_pos_y[2]++;
     m->block_pos_y[3]++;          
-  } else if (mino_counter < 40) {
+  } else if (mino_counter < 60) {
     m->pos_y += 2;
     m->block_pos_y[0] += 2;
     m->block_pos_y[1] += 2;
@@ -1191,9 +1194,9 @@ game_start:
             if (mino_counter < 20) {
               mino_next_counter = 55;
             } else if (mino_counter < 40) {
-              mino_next_counter = 35;
+              mino_next_counter = 40;
             } else {
-              mino_next_counter = 15;
+              mino_next_counter = 25;
             }
           }
 
@@ -1205,16 +1208,16 @@ game_start:
 
         for (int16_t x = 0; x < FIELD_SIZE_X; x++) {
           
-          // 砂がない、またはスリープ状態ならスキップ
+          // 砂がない(color=0)、またはスリープ状態(moment_x=-4_ならスキップ
           if (particles[y][x].attr.color == 0 || particles[y][x].attr.moment_x == -4) {
             continue;
           }
 
-          // --- 物理パラメータの更新 ---
+          // 物理パラメータの更新
           // 直下が空いているか、またはすでに落下モーメントがある場合
           if (y < FIELD_SIZE_Y-1 && particles[y+1][x].attr.color == 0) {
             if (particles[y][x].attr.moment_y == 0) {
-              // 動き出しのランダムXモーメント (4に設定するとスリープ状態)
+              // 動き出しのランダムXモーメント
               int16_t r = quickrand() & 127;
               particles[y][x].attr.moment_x = r <  2  ? -3 : 
                                               r < 15  ? -2 :
@@ -1250,8 +1253,7 @@ game_start:
                       particles[y][x].attr.moment_x = (quickrand() & 1) ? -1 : 1;
                   }
 
-                  // 【重要】滑り出す瞬間、サブピクセル位置を中央にリセットすると
-                  // 挙動がガタつかず滑らかになります
+                  // 滑り出す瞬間のサブピクセル位置を中央にリセット
                   particles[y][x].attr.sub_x = (quickrand() & 1) ? 3 : 4;
                   particles[y][x].attr.sub_y = 0;
                   
@@ -1278,14 +1280,14 @@ game_start:
 
           }
 
-          // --- 次の予測座標の計算 (ビット演算で高速化) ---
+          // 次の予測座標の計算
           int16_t current_py = (y << 3) | particles[y][x].attr.sub_y;
           int16_t current_px = (x << 3) | particles[y][x].attr.sub_x;
 
           int16_t next_py = current_py + particles[y][x].attr.moment_y;
           int16_t next_px = current_px + particles[y][x].attr.moment_x;
 
-          // 整数座標（グリッド位置）を算出 ( /8 は >>3、 %8 は &7 に置換)
+          // 整数座標（グリッド位置）を算出
           int16_t next_y_hi = next_py >> 3;
           int16_t next_x_hi = next_px >> 3;
 
@@ -1294,23 +1296,22 @@ game_start:
           if (next_x_hi < 0)                { next_x_hi = 0;                particles[y][x].attr.moment_x = 0; }
           if (next_x_hi > FIELD_SIZE_X - 1) { next_x_hi = FIELD_SIZE_X - 1; particles[y][x].attr.moment_x = 0; }
 
-          // --- 運命の衝突判定 ---
-          // 移動先が「自分自身と同じ場所」か、あるいは「移動先が空っぽ」なら移動成功！
+          // 砂の衝突判定
+          // 移動先が「自分自身と同じ場所」か、あるいは「移動先が空」か？
           if ((next_y_hi == y && next_x_hi == x) || particles[next_y_hi][next_x_hi].attr.color == 0) {
 
             if (next_y_hi == y && next_x_hi == x) {
+
               // 【パターンA】同じマス内でのサブピクセル移動（微細な動き）
-              // データの退避やクリアは不要！ 小数点座標だけをダイレクトに更新する
+              // 小数点座標だけをダイレクトに更新する
               particles[y][x].attr.sub_y = next_py & 7;
               particles[y][x].attr.sub_x = next_px & 7;
               
-              // 完全に同じマス内の動きなので、GVRAMへの転送（invalidate）は不要！！
-              // （ドット単位の描画は次のグリッド移動時に反映されるため、ここでラインを汚す必要はありません）
               //screen_buffers[page_calc][y][x] = particles[y][x].attr.color;
 
             } else {
 
-              // 【パターンB】別のマスへの本当の移動！
+              // 【パターンB】別のマスへの本当の移動
               PARTICLE tmp = particles[y][x];
               tmp.attr.sub_y = next_py & 7;
               tmp.attr.sub_x = next_px & 7;
@@ -1326,36 +1327,9 @@ game_start:
               // マスが変わったので、元いたラインと、移動先のラインを再描画対象にする
               invalidates[page_calc][y] = 1;
               invalidates[page_calc][next_y_hi] = 1;
-/*
-              // 色別グリッドバッファに書き込む (元のグリッドからは消さない) ---
-              int16_t c       = (tmp.attr.color - 1) & 3; // 4色グループへのマスク
-              int16_t next_cy = next_y_hi >> 1;     // 縦は2ドット単位なので「>> 1」(120行)
 
-              uint32_t bit_mask = 0;
-              int16_t bit_pos = 0;
+              // **厳密にはここで開通判定用ビットマップを更新すべきだが、動いている途中のものについては軌跡ができてしまうのであえてやらない
 
-              // px に応じて操作するビットの位置を特定
-              if (next_x_hi < 32)      { bit_pos = next_x_hi;       }
-              else if (next_x_hi < 64) { bit_pos = next_x_hi - 32;  }
-              else                     { bit_pos = next_x_hi - 64;  }
-
-              bit_mask = (1 << bit_pos);
-
-              // 1. まずは自分の色の coarse_map にビットを立てる（通常通り）
-              if (next_x_hi < 32)        coarse_map[c][next_cy].lo |= bit_mask;
-              else if (next_x_hi < 64)   coarse_map[c][next_cy].mi |= bit_mask;
-              else                       coarse_map[c][next_cy].hi |= bit_mask;
-
-              // 2. 【追加】自分以外の残り3色から、このグリッドのビットを「上書き消去」する！
-              for (int16_t other_c = 0; other_c < 4; other_c++) {
-                  if (other_c == c) continue; // 自分はスキップ
-
-                  if (next_x_hi < 32)        coarse_map[other_c][next_cy].lo &= ~bit_mask;
-                  else if (next_x_hi < 64)   coarse_map[other_c][next_cy].mi &= ~bit_mask;
-                  else                       coarse_map[other_c][next_cy].hi &= ~bit_mask;
-              }
-              */
-              // ★【前述のウェイクアップ処理を入れるならここ！】
               // 実際に別のマスへ移動が起きたので、周囲の砂を起こす
               if (y > 0) {
                 if (x > 0)                { if (particles[y-1][x-1].attr.moment_x == -4) particles[y-1][x-1].attr.moment_x = 0; }
@@ -1380,6 +1354,7 @@ game_start:
             }
 
           } else {
+
             // 衝突した（直下が埋まっていた）
             particles[y][x].attr.moment_y = 0; // 縦の勢いは止まる
 
@@ -1395,7 +1370,7 @@ game_start:
             } else if (right_empty) {
               particles[y][x].attr.moment_x = 1;  // 右に滑る
             } else {
-              if ((quickrand() & 63) == 0) {
+              if ((quickrand() & 15) == 0) {
                 particles[y][x].attr.moment_x = -4; // 睡眠状態へ
               } else {
                 particles[y][x].attr.moment_x = 0;  // まだ起きて微振動のチャンスを残す
@@ -1420,7 +1395,7 @@ game_start:
               else if (x < 64)   coarse_map[c][cy].mi |= bit_mask;
               else               coarse_map[c][cy].hi |= bit_mask;
 
-              // 2. 【追加】自分以外の残り3色から、このグリッドのビットを「上書き消去」する！
+              // 2. 自分以外の残り3色から、このグリッドのビットを消去する
               for (int16_t other_c = 0; other_c < 4; other_c++) {
                   if (other_c == c) continue; // 自分はスキップ
 
@@ -1435,11 +1410,11 @@ game_start:
         }
       }
 
-      // 左右が繋がったかチェック (2フレームに1回、1色ずつ)
-      if ((counter % 2) == 0 && fire_c < 0) {
+      // 左右が繋がったかチェック (4フレームに1回、1色ずつ)
+      if ((counter & 3) == 0 && fire_c < 0) {
 
-        int16_t c = (counter >> 1) & 3;
-//        for (int16_t c = 0; c < 4; c++) {   // 4色
+        int16_t c = (counter >> 2) & 3;
+//        for (int16_t c = 0; c < 4; c++) {   // 4色まとめてやるなら
 
         // 【初期化】各行の「左端（ビット0）に砂がある場所」だけに火をつける
         for (int16_t y = 0; y < FIELD_SIZE_Y/2; y++) {
@@ -1466,7 +1441,7 @@ game_start:
 
             BITLINE80 next_f;
 
-            // --- 火を「右（ビットが増える方向 = << 1）」へ広げる ---
+            // 火を「右（ビットが増える方向 = << 1）」へ広げる 
             uint32_t carry_lo = f.lo >> 31; // loの最上位は、miの最下位(ビット0)へ
             uint32_t carry_mi = f.mi >> 31; // miの最上位は、hiの最下位(ビット0)へ
             
@@ -1474,7 +1449,7 @@ game_start:
             next_f.mi = (f.mi << 1) | carry_lo;
             next_f.hi = (f.hi << 1) | carry_mi;
 
-            // --- 火を「左（ビットが減る方向 = >> 1）」へ広げる（折り返し用） ---
+            // 火を「左（ビットが減る方向 = >> 1）」へ広げる（折り返し用） 
             uint32_t borrow_mi = (f.mi & 1) << 31; // miの最下位は、loの最上位(ビット31)へ
             uint32_t borrow_hi = (f.hi & 1) << 31; // hiの最下位は、miの最上位(ビット31)へ
 
@@ -1611,7 +1586,7 @@ game_start:
                   changed = 1;
               }
             }
-            if (!changed) break; // 最短即抜け
+            if (!changed) break;
           }
         }
 
