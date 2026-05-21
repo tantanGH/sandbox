@@ -7,10 +7,11 @@ endif
 .SUFFIXES:
 
 # バージョン
-VERSION = 010
+VERSION = 020
 
 # 実行ファイル名
-TARGET_FILE = SANDBOX.X
+TARGET_FILE_000 = SANDBOX.X
+TARGET_FILE_060 = SAND060.X
 
 # ドキュメントファイル名
 DOCUMENT_FILE = SANDBOX.TXT
@@ -36,42 +37,55 @@ C_SRCS = main.c
 ASM_SRCS = 
 
 # *.h source files
-HEADER_SRCS = sandbox.h
+HEADER_SRCS = keyboard.h crtc.h pattern.h sandbox.h
 
 # リンク対象のライブラリファイル
 LIBS =
 
 # 中間ファイル生成用ディレクトリ
-INTERMEDIATE_DIR = _build
+INTERMEDIATE_DIR_000 = _build000
+INTERMEDIATE_DIR_060 = _build060
 
 # オブジェクトファイル
-OBJS =	$(addprefix $(INTERMEDIATE_DIR)/,$(patsubst %.c,%.o,$(C_SRCS))) \
-	   	$(addprefix $(INTERMEDIATE_DIR)/,$(patsubst %.s,%.o,$(ASM_SRCS)))
+OBJS_000 =	$(addprefix $(INTERMEDIATE_DIR_000)/,$(patsubst %.c,%.o,$(C_SRCS))) \
+	   	    $(addprefix $(INTERMEDIATE_DIR_000)/,$(patsubst %.s,%.o,$(ASM_SRCS)))
+OBJS_060 =	$(addprefix $(INTERMEDIATE_DIR_060)/,$(patsubst %.c,%.o,$(C_SRCS))) \
+	   	    $(addprefix $(INTERMEDIATE_DIR_060)/,$(patsubst %.s,%.o,$(ASM_SRCS)))
 
 # コンパイルフラグ
-COMMON_FLAGS = -m68060 -O2 -msoft-float -specs=nano.specs $(INCLUDE_FLAGS) -fno-defer-pop
-CFLAGS = $(COMMON_FLAGS)
+COMMON_FLAGS_000 = -m68000 -O2 -msoft-float -specs=nano.specs $(INCLUDE_FLAGS) -fno-defer-pop
+CFLAGS_000 = $(COMMON_FLAGS_000)
+COMMON_FLAGS_060 = -m68060 -O2 -msoft-float -specs=nano.specs $(INCLUDE_FLAGS) -fno-defer-pop
+CFLAGS_060 = $(COMMON_FLAGS_060)
 
 # デフォルトのターゲット
-all : ${INTERMEDIATE_DIR}/$(TARGET_FILE)
+all : ${INTERMEDIATE_DIR_000}/$(TARGET_FILE_000) ${INTERMEDIATE_DIR_060}/$(TARGET_FILE_060)
 
 # 中間生成物の削除
 clean : 
 	rm -f $(PACKAGE_FILE)
-	rm -rf $(INTERMEDIATE_DIR)
+	rm -rf $(INTERMEDIATE_DIR_000)
+	rm -rf $(INTERMEDIATE_DIR_060)
 
 # 実行ファイルの生成
-${INTERMEDIATE_DIR}/$(TARGET_FILE) : $(OBJS)
-	mkdir -p $(INTERMEDIATE_DIR)
-	$(CC) $(COMMON_FLAGS) $(LDFLAGS) -o ${INTERMEDIATE_DIR}/${TARGET_FILE} $(OBJS) $(LIBS)
+${INTERMEDIATE_DIR_000}/$(TARGET_FILE_000) : $(OBJS_000)
+	mkdir -p $(INTERMEDIATE_DIR_000)
+	$(CC) $(COMMON_FLAGS_000) $(LDFLAGS) -o ${INTERMEDIATE_DIR_000}/${TARGET_FILE_000} $(OBJS_000) $(LIBS)
+${INTERMEDIATE_DIR_060}/$(TARGET_FILE_060) : $(OBJS_060)
+	mkdir -p $(INTERMEDIATE_DIR_060)
+	$(CC) $(COMMON_FLAGS_060) $(LDFLAGS) -o ${INTERMEDIATE_DIR_060}/${TARGET_FILE_060} $(OBJS_060) $(LIBS)
 
 # *.c ソースのコンパイル
-$(INTERMEDIATE_DIR)/%.o : %.c Makefile $(HEADER_SRCS)
-	mkdir -p $(INTERMEDIATE_DIR)
-	$(CC) $(CFLAGS) -c $*.c -o $(INTERMEDIATE_DIR)/$*.o
+$(INTERMEDIATE_DIR_000)/%.o : %.c Makefile $(HEADER_SRCS)
+	mkdir -p $(INTERMEDIATE_DIR_000)
+	$(CC) $(CFLAGS_000) -c $*.c -o $(INTERMEDIATE_DIR_000)/$*.o
+$(INTERMEDIATE_DIR_060)/%.o : %.c Makefile $(HEADER_SRCS)
+	mkdir -p $(INTERMEDIATE_DIR_060)
+	$(CC) $(CFLAGS_060) -c $*.c -o $(INTERMEDIATE_DIR_060)/$*.o
 
 # 配布用パッケージ作成
 package:
 	zip -j ${PACKAGE_FILE} \
 			${DOCUMENT_FILE} \
-			${INTERMEDIATE_DIR}/${TARGET_FILE}
+			${INTERMEDIATE_DIR_000}/${TARGET_FILE_000} \
+			${INTERMEDIATE_DIR_060}/${TARGET_FILE_060}
