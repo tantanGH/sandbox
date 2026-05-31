@@ -386,7 +386,7 @@ static void mino_move(MINO* m, uint32_t counter) {
     }
   }
   if ((j & 0x20)) {
-    // ボタンBが離された
+    // ボタンAが離された
     trigger_a = 0;
   }
 
